@@ -46,11 +46,14 @@ Nautylus focuses on workloads where the hard problems are not model training, bu
 - graph-aware re-ranking
 - hybrid (graph + vector) retrieval
 
-### Ideation / Synthesis (Mode B)
+### Ideation / Synthesis / Prediction (Mode B)
 - "novel but relevant" retrieval
 - diversity and coverage
 - constraint-driven exploration ("must include X, avoid Y")
 - explainable "why this combination is interesting"
+- crowd intelligence: aggregate signals and surface consensus/contrarian candidates
+- crowd prediction: rank outcomes with transparent, deterministic scores
+- anomaly surfacing: outliers, rare patterns, and unexpected combinations
 - anti-duplication / distance-from-corpus novelty signals
 
 Same engine, same primitives; only the objective changes.
@@ -163,6 +166,9 @@ Patterns:
 Signals:
 - graph proximity (e.g., PPR-lite, co-occurrence, neighborhood overlap)
 - vector similarity
+- graph algorithms (centrality, community detection, motif counts)
+- vector algorithms (ANN indexing, clustering, re-ranking heuristics)
+- statistical signal methods (z-scores, Bayesian aggregation, calibration, confidence bands)
 - recency/popularity boosts
 - constraints as hard filters
 
