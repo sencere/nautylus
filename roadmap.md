@@ -231,6 +231,30 @@ For each result:
 - Python results identical to C
 - demos under 50 LOC each
 
+### Milestone 10.5 — Local CLI + Minimal UI (Interactive Demo)
+- `nautylus` CLI:
+  - create/open a local store
+  - load a small demo dataset (CSV/JSON)
+  - run `find`, `rank`, `explain` with printed outputs
+- minimal local web UI:
+  - runs on localhost
+  - browse nodes/edges
+  - run a canned query and show score breakdown
+  - no external services required
+
+**Acceptance**
+- CLI works end-to-end on a fresh checkout
+- UI runs locally and uses the same deterministic outputs as CLI
+
+### Milestone 10.6 — D3.js Graph Visualization
+- optional D3.js visualization in the local UI
+- render nodes/edges and highlight query results
+- keep data deterministic and local-only (no external services)
+
+**Acceptance**
+- graph view renders from the same demo dataset
+- result selection highlights paths/edges consistently
+
 ---
 
 ## Phase VII — Data Connectivity (No Pain, No Magic)
