@@ -1,338 +1,373 @@
 # Nautylus Roadmap
-**Embedded Graph + Vector Meaning Engine for Recommendation and Ideation**
 
-Nautylus is a **single-node, embedded** database that fuses **graph structure + vector similarity + deterministic scoring + explainability** so teams can build **recommendations** and **ideation/synthesis** features without glue-code pain.
+**An Embedded Graph & Vector Analysis Database for Understanding, Exploration, and Decision Systems**
 
-It is **not** a model-training system and **does not** embed an agent. Agents and apps query it.
+## Current Status (Alpha)
 
----
+Implemented foundation pieces to validate determinism and core ergonomics:
 
-## 0. Positioning
+- graph core with deterministic iteration and referential integrity
+- vector core with exact kNN and stable ordering
+- local CLI + minimal UI for interactive inspection
+- CSV/JSON loaders and a simple local store snapshot format
+- bundled D3.js graph visualization (local-only)
 
-Nautylus focuses on workloads where the hard problems are not model training, but **retrieval, scoring, and explainability**:
-
-- candidate generation is ad-hoc
-- scoring logic is scattered across services
-- explanations are bolted on
-- pipelines become non-deterministic and untestable
-- integration adds infra overhead
-
-**Nautylus' bet:** these workloads fit on one machine and benefit from an embedded engine that makes:
-
-- graph + vector retrieval trivial
-- scoring composable and deterministic
-- explanations first-class and testable
-- integration friction near zero
+These are **foundational** components; they are not the final production surface.
+The core focus remains a **professional, deterministic embedded database** with
+auditable behavior, predictable performance, and stable APIs.
 
 ---
 
-## 1. Core Principles
+## 1. What Nautylus Is
 
-1. **Embedded-first** — in-process library, no server required.
-2. **Single-node excellence** — locality and determinism before distribution.
-3. **C core, stable ABI** — auditable, portable, bindings-friendly.
-4. **Determinism by default** — stable ordering, reproducible scores.
-5. **Meaning primitives** — retrieval + scoring + explainability at the center.
-6. **Minimal surface area** — fewer features, stronger guarantees.
+**Nautylus is an embedded application analysis database.**
 
----
+It is designed to help applications **analyze structured meaning** across entities, relationships, and embeddings in order to:
 
-## 2. What Nautylus Enables
+* understand complex systems
+* explore idea spaces
+* surface patterns, anomalies, and structure
+* build transparent decision logic
+* derive recommendations when needed
 
-### Recommendation (Mode A)
-- personalized ranking
-- similar-items
-- session-based suggestions
-- graph-aware re-ranking
-- hybrid (graph + vector) retrieval
+Rather than optimizing for storage or model training, Nautylus focuses on **analysis, scoring, and explainability** — the part where applications turn data into understanding.
 
-### Ideation / Synthesis / Prediction (Mode B)
-- "novel but relevant" retrieval
-- diversity and coverage
-- constraint-driven exploration ("must include X, avoid Y")
-- explainable "why this combination is interesting"
-- crowd intelligence: aggregate signals and surface consensus/contrarian candidates
-- crowd prediction: rank outcomes with transparent, deterministic scores
-- anomaly surfacing: outliers, rare patterns, and unexpected combinations
-- anti-duplication / distance-from-corpus novelty signals
-
-Same engine, same primitives; only the objective changes.
+Nautylus runs **inside your application** as a single-node library. There is no server, no agent, and no hidden automation.
 
 ---
 
-## 3. System Architecture (Conceptual)
+## 2. What Nautylus Is *Not*
 
-Bindings (Python v1, then others)
+To avoid confusion, Nautylus is **not**:
+
+* a model training framework
+* an autonomous agent system
+* a distributed graph database
+* a black-box recommendation service
+* an auto-ETL or “import everything” platform
+
+Instead, it is a **deterministic analysis engine** that applications control explicitly.
+
+---
+
+## 3. The Core Problem Nautylus Solves
+
+Modern applications often need to answer questions like:
+
+* *What entities are meaningfully related, and why?*
+* *What patterns emerge from the structure of the system?*
+* *What ideas are novel but still grounded in existing data?*
+* *Which signals matter, and how do they combine?*
+* *Why did the system arrive at this conclusion?*
+
+Today, these answers are usually spread across:
+
+* graph databases
+* vector databases
+* ad-hoc ranking code
+* offline analysis scripts
+* dashboards without reproducibility
+
+This leads to:
+
+* non-deterministic behavior
+* fragile pipelines
+* opaque results
+* difficult testing and reasoning
+
+**Nautylus’ approach** is to make *analysis itself* a first-class, embedded capability.
+
+---
+
+## 4. Design Principles
+
+1. **Analysis-first, not storage-first**
+   Data exists to be analyzed, scored, and explained.
+
+2. **Embedded and local**
+   One process, one machine, no operational overhead.
+
+3. **Deterministic by default**
+   Identical inputs always produce identical outputs.
+
+4. **Graph + vector as equal primitives**
+   Structure and similarity are treated together, not glued.
+
+5. **Explainability is mandatory**
+   Every result can be traced back to evidence.
+
+6. **Minimal surface area, strong guarantees**
+   Fewer features, but each one is precise and reliable.
+
+---
+
+## 5. What Nautylus Enables (Conceptually)
+
+Nautylus enables **structured reasoning over application data**.
+
+### A. System & Application Analysis
+
+* analyze entity relationships
+* measure proximity, influence, and connectivity
+* detect communities, hubs, and bridges
+* surface anomalies and rare patterns
+* reason about structure, not just similarity
+
+### B. Idea Creation & Exploration
+
+* explore “nearby but distinct” concepts
+* enforce novelty and diversity constraints
+* synthesize combinations of entities
+* compare competing explanations or hypotheses
+* understand *why* something is interesting
+
+### C. Decision & Scoring Systems
+
+* combine multiple signals deterministically
+* rank outcomes with transparent logic
+* calibrate and normalize signals
+* test and version scoring strategies
+
+### D. Recommendation Systems (Derived Use Case)
+
+* personalized ranking
+* similar-items retrieval
+* graph-aware re-ranking
+* explainable recommendations
+
+> Recommendations are a **special case** of analysis + scoring — not the defining purpose.
+
+---
+
+## 6. High-Level Architecture
+
+```
+Application (Python / Rust / Go / …)
+│
+├── analyze()
+├── find()
+├── rank()
+├── diversify()
+├── explain()
 │
 ▼
-Stable C ABI
+Nautylus Embedded Engine
 │
-▼
-Execution Engine (Pipelines)
-- FIND / FILTER / EXPAND / JOIN
-- RANK (signals + weights)
-- DIVERSIFY / NOVELTY
-- EXPLAIN (evidence + breakdown)
+├── Graph Core
+│   ├── nodes, edges, properties
+│   └── graph algorithms
 │
-▼
-Graph + Vector Core
-- adjacency + properties
-- vector fields + index
+├── Vector Core
+│   ├── embeddings
+│   └── similarity search
 │
-▼
-Storage
-- WAL
-- Snapshots
-- Versioning + checksums
+├── Analysis Pipelines
+│   ├── traversal
+│   ├── scoring
+│   ├── diversity & novelty
+│   └── aggregation
+│
+└── Explainability Layer
+```
 
 ---
 
-## 4. Roadmap Overview
+## 7. Roadmap Overview
 
-| Phase | Focus | Outcome |
-|------|-------|---------|
-| I | Core graph + memory model | Fast deterministic in-memory graph |
-| II | Vector core + hybrid retrieval | Graph<->Vector fusion with stable ranking |
-| III | Scoring pipelines | Composable signals + deterministic ranking |
-| IV | Explainability | Evidence + score decomposition |
-| V | Persistence | WAL + snapshots + reproducible restarts |
-| VI | Integration surface | C ABI + first bindings + examples |
-| VII | Data connectivity | Attach/read-through + explicit materialization |
-| VIII | Hardening | fuzzing, benchmarks, stability |
-| IX | Bindings expansion | multiple languages, zero-pain embedding |
-
----
-
-## Phase I — Graph Core (Single-node)
-
-### Milestone 1 — Memory Model
-- arena/slab allocator for nodes/edges/properties
-- stable internal IDs (`uint64_t`) mapped to dense storage
-- deterministic iteration order documented
-
-**Acceptance**
-- 1M nodes with <10% overhead
-- Valgrind + ASAN clean teardown
-- iteration order stable across runs
-
-### Milestone 2 — Graph Operations
-- CRUD nodes/edges
-- edge types + weights + timestamps
-- referential integrity (no dangling edges)
-- neighbor iterators
-
-**Acceptance**
-- randomized mutation tests maintain invariants
-- baseline traversals match reference outputs
+| Phase | Focus                     | User Value               |
+| ----- | ------------------------- | ------------------------ |
+| I     | Graph core                | Structural understanding |
+| II    | Vector + hybrid retrieval | Meaning-aware similarity |
+| III   | Analysis pipelines        | Deterministic reasoning  |
+| IV    | Graph algorithms          | Deeper system insight    |
+| V     | Explainability            | Trust and transparency   |
+| VI    | Persistence               | Reproducible analysis    |
+| VII   | Integration & demos       | Practical usability      |
+| VIII  | Data connectivity         | Real-world datasets      |
+| IX    | Hardening & expansion     | Production readiness     |
 
 ---
 
-## Phase II — Vector Core + Hybrid Retrieval
+## Phase I — Graph Core (Structural Foundation)
 
-### Milestone 3 — Vector Fields
-- node-attached vectors (float32)
-- fixed dimension per index
-- exact kNN baseline
+### Scope
 
-**Acceptance**
-- exact kNN correctness verified
-- deterministic top-k ordering (tie-break rules)
+* embedded graph storage
+* nodes, edges, properties
+* deterministic traversal
 
-### Milestone 4 — Hybrid Retrieval Patterns
-Patterns:
-- vector -> graph expansion
-- graph -> vector search
-- intersection + re-rank
+### Enables
 
-**Acceptance**
-- hybrid results deterministic
-- graph-only and vector-only unchanged
-- weight configs tested
+* modeling application entities
+* reasoning about relationships
+* reproducible graph analysis
+
+**Status:** implemented (alpha)
 
 ---
 
-## Phase III — Scoring Pipelines (Meaning Engine)
+## Phase II — Vector Core & Hybrid Analysis
 
-### Milestone 5 — Pipeline VM (Minimal)
-- operator pipeline: `scan -> filter -> expand -> project -> rank`
-- builder-style API (no DSL commitment yet)
-- stable `EXPLAIN` operator tree
+### Scope
 
-**Acceptance**
-- multi-hop traversals correct
-- `EXPLAIN` stable across runs
+* node-attached embeddings
+* deterministic kNN
+* graph ↔ vector workflows
 
-### Milestone 6 — RANK (Signals + Weights)
-Signals:
-- graph proximity (e.g., PPR-lite, co-occurrence, neighborhood overlap)
-- vector similarity
-- graph algorithms (centrality, community detection, motif counts)
-- vector algorithms (ANN indexing, clustering, re-ranking heuristics)
-- statistical signal methods (z-scores, Bayesian aggregation, calibration, confidence bands)
-- recency/popularity boosts
-- constraints as hard filters
+### Enables
 
-**Acceptance**
-- reproducible scores across runs
-- component scores sum to final (within tolerance)
+* semantic similarity
+* contextual expansion
+* structure-aware search
+
+**Status:** implemented (exact kNN baseline)
 
 ---
 
-## Phase IV — Explainability (First-class)
+## Phase III — Analysis Pipelines
 
-### Milestone 7 — EXPLAIN Payload
-For each result:
-- score breakdown per signal
-- evidence neighbors / paths
-- similarity justification (vector contribution)
-- applied boosts / filters
+### Scope
 
-**Acceptance**
-- explanation equals computed score (within tolerance)
-- evidence paths reproducible across runs
+* composable pipeline execution
+* traversal, filtering, joining
+* deterministic ranking
 
----
+### Enables
 
-## Phase V — Persistence
+* explicit reasoning logic
+* testable analysis steps
+* controlled signal composition
 
-### Milestone 8 — WAL + Snapshots
-- append-only WAL
-- periodic snapshots
-- versioned headers + checksums
-- recovery: snapshot -> WAL replay
-
-**Acceptance**
-- kill -9 recovery passes
-- corrupt segments detected
-- identical query outputs pre/post restart
+**Status:** planned
 
 ---
 
-## Phase VI — Integration Surface (Zero-pain Embedding)
+## Phase IV — Graph Algorithms (First-Class)
 
-### Milestone 9 — Stable C API (v1)
-- opaque handles
-- explicit lifetimes
-- single-writer / multi-reader transactions
-- stable ABI policy
+### Scope
 
-**Acceptance**
-- sanitizer clean
-- minimal C examples: load, write, rank, explain
+* proximity and influence metrics
+* centrality and importance
+* community and subgraph analysis
+* motif and pattern detection
 
-### Milestone 10 — First Binding (Python v1)
-- thin wrapper over C API
-- wheels via CI
-- demo notebooks:
-  - recommendation
-  - ideation (novel + diverse)
+### Enables
 
-**Acceptance**
-- Python results identical to C
-- demos under 50 LOC each
+* deeper system understanding
+* discovery of latent structure
+* insight beyond nearest neighbors
 
-### Milestone 10.5 — Local CLI + Minimal UI (Interactive Demo)
-- `nautylus` CLI:
-  - create/open a local store
-  - load a small demo dataset (CSV/JSON)
-  - run `find`, `rank`, `explain` with printed outputs
-- minimal local web UI:
-  - runs on localhost
-  - browse nodes/edges
-  - run a canned query and show score breakdown
-  - no external services required
-
-**Acceptance**
-- CLI works end-to-end on a fresh checkout
-- UI runs locally and uses the same deterministic outputs as CLI
-
-### Milestone 10.6 — D3.js Graph Visualization
-- optional D3.js visualization in the local UI
-- render nodes/edges and highlight query results
-- keep data deterministic and local-only (no external services)
-
-**Acceptance**
-- graph view renders from the same demo dataset
-- result selection highlights paths/edges consistently
+**Status:** planned
 
 ---
 
-## Phase VII — Data Connectivity (No Pain, No Magic)
+## Phase V — Explainability
 
-### Milestone 11 — Explicit Materialization
-- CLI to materialize only what's needed:
-  - entity IDs
-  - selected properties
-  - edges
-  - embeddings
-- incremental updates (by watermark)
+### Scope
 
-**Acceptance**
-- repeatable builds (same input snapshot -> same index)
-- safe failure modes (partial builds rejected)
+* score decomposition
+* evidence paths
+* signal attribution
 
-### Milestone 12 — Attach / Read-through (Optional)
-- attach Parquet/CSV first
-- optional SQLite/Postgres read-only later
+### Enables
 
-**Acceptance**
-- attach never mutates source
-- deterministic outputs given same source snapshot
+* transparent decisions
+* debuggable analysis
+* user-facing explanations
+
+**Status:** planned
 
 ---
 
-## Phase VIII — Hardening
+## Phase VI — Persistence & Reproducibility
 
-### Milestone 13 — Fuzzing + Property Testing
-- WAL fuzzing
-- pipeline fuzzing
-- mutation tests for graph invariants
+### Scope
 
-### Milestone 14 — Benchmarks
-- microbenchmarks in CI
-- workload suites:
-  - rec: similar-items, personalized ranking
-  - ideation: novelty + diversity constrained retrieval
+* WAL and snapshots
+* versioned data
+* reproducible restarts
 
----
+### Enables
 
-## Phase IX — Bindings Expansion (Integration Everywhere)
+* historical comparison
+* auditability
+* scientific-style experimentation
 
-### Milestone 15 — Additional Bindings (Prioritized)
-- Node.js
-- Rust
-- Go
-- Java/Kotlin
-- PHP (extension or FFI wrapper)
-
-**Acceptance**
-- consistent API surface across languages
-- golden tests: identical outputs across bindings
+**Status:** planned (WAL + snapshots)
 
 ---
 
-## v1 Cutline (Explicit Non-goals)
-- no clustering/sharding
-- no built-in agent or model training
-- no "import everything" auto-ETL
-- no giant SQL dialect in v1
-- no non-deterministic defaults
+## Phase VII — Integration & Demonstrations
+
+### Deliverables
+
+* stable C API
+* Python binding
+* CLI and local UI
+
+### Required Demos
+
+1. **System analysis demo**
+   Explore structure, influence, and communities.
+
+2. **Idea exploration demo**
+   Novelty + diversity + explanation.
+
+3. **Recommendation demo**
+   Personalized and explainable ranking.
+
+Each demo is:
+
+* local-only
+* deterministic
+* minimal code
+
+**Status:** CLI + local UI implemented (demo); bindings planned
 
 ---
 
-## Definition of "No Pain to Integrate"
+## Phase VIII — Data Connectivity
+
+### Scope
+
+* explicit materialization
+* CSV / JSON / Parquet
+* incremental rebuilds
+
+### Guarantees
+
+* no hidden mutations
+* reproducible inputs → outputs
+
+**Status:** CSV/JSON loaders + local snapshot format implemented (alpha)
+
+---
+
+## Phase IX — Hardening & Expansion
+
+* fuzzing and property testing
+* benchmark suites
+* additional language bindings
+
+**Status:** planned
+
+---
+
+## Definition of “Easy to Use”
+
 A user can:
-1. embed Nautylus (library) or run a local binary (optional)
-2. materialize/attach data with one command
-3. call `find/rank/explain/diversify/novelty` from their language
-4. get back IDs + scores + explanations
 
-No glue microservices required.
+1. embed Nautylus as a library
+2. load or attach structured data
+3. run analysis pipelines
+4. retrieve scores, structure, and explanations
+
+No distributed systems required.
 
 ---
 
-## Next (Optional Spec Docs)
-- v1 API (C headers + semantic contract)
-- scoring signal library (minimal set + guarantees)
-- determinism rules (ordering, float ties, stable hashing)
-- ideation cookbook (novelty/diversity patterns)
+## One-Sentence Positioning
+
+> **Nautylus is an embedded analysis database that lets applications reason over graph structure and semantic meaning to understand systems, explore ideas, and derive explainable decisions — including recommendations.**
+
+---
