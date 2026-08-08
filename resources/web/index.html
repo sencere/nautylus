@@ -1,113 +1,506 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>nautylus</title>
   <style>
     :root {
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      color: #1b1f23;
-      background: #f4f6f8;
+      color-scheme: light;
+      --page: #f4f6f8;
+      --panel: #ffffff;
+      --line: #dfe4ea;
+      --text: #263238;
+      --muted: #68757f;
+      --relationship: #a5abb6;
+      --relationship-selected: #37474f;
+      --selection: #1f6feb;
+      --accent: #3771c8ff;
+      --shadow: 0 12px 30px rgba(27, 39, 51, .08);
     }
-    body { margin: 0; }
-    .shell { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
-    .side { background: #17202a; color: #f8fafc; padding: 24px 20px; }
-    .brand { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 700; }
-    .brand img { width: 34px; height: 34px; }
-    .meta { margin-top: 24px; display: grid; gap: 10px; color: #cbd5e1; font-size: 13px; }
-    .main { padding: 24px; display: grid; gap: 18px; }
-    .bar { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
-    .grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 18px; }
-    .panel { background: white; border: 1px solid #d9e0e7; border-radius: 8px; padding: 16px; }
-    .panel.graph-panel { min-height: 520px; padding: 0; overflow: hidden; position: relative; }
-    #graph { width: 100%; height: 520px; display: block; background: #fbfcfe; cursor: default; touch-action: none; }
-    .panel h2 { font-size: 15px; margin: 0 0 12px; color: #111827; }
-    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    button { border: 1px solid #0f766e; background: #0f766e; color: white; border-radius: 6px; padding: 8px 11px; font-weight: 650; cursor: pointer; }
-    button.secondary { background: white; color: #0f766e; }
-    input, textarea { width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 6px; padding: 9px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
-    textarea { min-height: 110px; resize: vertical; }
-    .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-    input[type="color"] { min-height: 36px; padding: 3px; }
-    pre { margin: 0; white-space: pre-wrap; background: #0f172a; color: #e2e8f0; border-radius: 6px; padding: 12px; min-height: 96px; max-height: 360px; overflow: auto; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .status { font-size: 13px; color: #475569; }
-    @media (max-width: 820px) {
-      .shell { grid-template-columns: 1fr; }
-      .grid { grid-template-columns: 1fr; }
-      .side { padding: 16px; }
-      .main { padding: 16px; }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      min-height: 100%;
+      margin: 0;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--text);
+      background: var(--page);
+    }
+
+    body { min-height: 100vh; }
+
+    button {
+      appearance: none;
+      border: 1px solid #c8d0d8;
+      background: #fff;
+      color: #263238;
+      border-radius: 8px;
+      padding: 8px 12px;
+      font: inherit;
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+
+    button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: #fff;
+      font-weight: 700;
+    }
+
+    button:hover { background: #f7f9fb; }
+    button.primary:hover { background: #2f63ad; }
+    button:focus-visible, input:focus-visible, textarea:focus-visible {
+      outline: 3px solid rgba(31, 111, 235, .25);
+      outline-offset: 2px;
+    }
+
+    input, textarea {
+      width: 100%;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      background: #fff;
+      color: var(--text);
+      font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    textarea {
+      min-height: 96px;
+      padding: 10px;
+      resize: vertical;
+    }
+
+    .app-shell {
+      width: min(1560px, calc(100% - 28px));
+      margin: 14px auto;
+    }
+
+    .topbar {
+      display: grid;
+      grid-template-columns: auto minmax(260px, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      min-width: 0;
+    }
+
+    .brand img { width: 50px; height: 46px; }
+
+    .query-bar {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto auto;
+      align-items: start;
+      gap: 8px;
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #fff;
+      box-shadow: var(--shadow);
+      padding: 7px;
+    }
+
+    .query-prompt {
+      display: grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      background: var(--accent);
+      color: #fff;
+      font: 800 16px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    #query {
+      min-height: 34px;
+      max-height: 140px;
+      padding: 7px 2px;
+      border: 0;
+      border-radius: 0;
+      resize: none;
+      overflow-y: auto;
+      line-height: 20px;
+    }
+
+    .status {
+      justify-self: end;
+      max-width: 300px;
+      color: var(--muted);
+      font-size: 13px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      gap: 12px;
+      height: calc(100vh - 80px);
+      min-height: 560px;
+    }
+
+    .graph, .inspector, .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .graph {
+      position: relative;
+      cursor: grab;
+    }
+
+    .graph svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+      cursor: grab;
+    }
+
+    .graph svg:active { cursor: grabbing; }
+
+    .graph-toolbar {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      z-index: 3;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .graph-toolbar button {
+      background: rgba(255, 255, 255, .92);
+      backdrop-filter: blur(8px);
+    }
+
+    .inspector {
+      padding: 18px;
+      overflow: auto;
+    }
+
+    .inspector h2, .panel h2 {
+      margin: 0 0 8px;
+      font-size: 15px;
+    }
+
+    .inspector h3 {
+      margin: 16px 0 8px;
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+    }
+
+    .inspector p { margin: 5px 0; font-size: 13px; line-height: 1.45; }
+    .hint { color: var(--muted); }
+
+    .details {
+      display: grid;
+      grid-template-columns: 1fr;
+      margin-top: 12px;
+    }
+
+    .panel { padding: 14px; }
+
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 8px;
+    }
+
+    .cols {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+
+    input { min-height: 36px; padding: 9px; }
+    input[type="color"] { padding: 3px; }
+
+    pre {
+      min-height: 96px;
+      max-height: 220px;
+      margin: 8px 0 0;
+      padding: 12px;
+      overflow: auto;
+      border-radius: 8px;
+      background: #101820;
+      color: #e2e8f0;
+      white-space: pre-wrap;
+      font: 13px ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+
+    .property-table {
+      width: 100%;
+      border-collapse: collapse;
+      table-layout: fixed;
+      font-size: 12px;
+    }
+
+    .property-table th, .property-table td {
+      padding: 7px 0;
+      border-bottom: 1px solid #edf0f2;
+      vertical-align: top;
+      text-align: left;
+      overflow-wrap: anywhere;
+    }
+
+    .property-table th {
+      width: 40%;
+      color: var(--muted);
+      font-weight: 500;
+      padding-right: 8px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      min-height: 22px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      background: #eef2f5;
+      font-size: 11px;
+      font-weight: 700;
+    }
+
+    .color-editor {
+      display: grid;
+      grid-template-columns: 44px 1fr;
+      gap: 8px;
+      align-items: center;
+      margin: 8px 0 4px;
+    }
+
+    .color-editor input[type="color"] {
+      width: 44px;
+      height: 34px;
+      min-height: 34px;
+      padding: 3px;
+    }
+
+    .color-editor .row { margin-top: 0; }
+
+    .relationship-path {
+      fill: none;
+      stroke: var(--relationship);
+      stroke-width: 2.2;
+      vector-effect: non-scaling-stroke;
+      cursor: pointer;
+    }
+
+    .relationship-hit {
+      fill: none;
+      stroke: transparent;
+      stroke-width: 16;
+      vector-effect: non-scaling-stroke;
+      cursor: pointer;
+    }
+
+    .relationship.selected .relationship-path { stroke: var(--relationship-selected); stroke-width: 3; }
+    .relationship.dimmed { opacity: .15; }
+
+    .relationship-label-bg {
+      fill: #fff;
+      stroke: #e4e8ec;
+      stroke-width: 1;
+      rx: 3;
+      ry: 3;
+      pointer-events: none;
+    }
+
+    .relationship-label {
+      fill: #5d6870;
+      font-size: 9px;
+      font-weight: 700;
+      letter-spacing: .035em;
+      text-anchor: middle;
+      dominant-baseline: middle;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .node { cursor: pointer; }
+    .node.dimmed { opacity: .16; }
+
+    .node-ring {
+      fill: #fff;
+      stroke: transparent;
+      stroke-width: 4;
+    }
+
+    .node.selected .node-ring { stroke: var(--selection); }
+
+    .node-circle {
+      stroke-width: 2.5;
+      filter: drop-shadow(0 2px 2px rgba(30, 41, 59, .14));
+    }
+
+    .node-label {
+      fill: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      text-anchor: middle;
+      dominant-baseline: middle;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .node-sublabel {
+      fill: rgba(255,255,255,.88);
+      font-size: 8px;
+      text-anchor: middle;
+      dominant-baseline: middle;
+      pointer-events: none;
+      user-select: none;
+    }
+
+    .pin-dot {
+      fill: #fff;
+      stroke: #263238;
+      stroke-width: 1.5;
+      pointer-events: none;
+    }
+
+    @media (max-width: 1040px) {
+      .topbar { grid-template-columns: 1fr; }
+      .status { justify-self: start; }
+      .workspace { grid-template-columns: 1fr; height: auto; }
+      .graph { height: 68vh; min-height: 500px; }
+      .inspector { min-height: 220px; }
+    }
+
+    @media (max-width: 640px) {
+      .app-shell { width: calc(100% - 20px); margin: 10px auto; }
+      .query-bar { grid-template-columns: auto minmax(0, 1fr) auto; }
+      #explainButton { display: none; }
+      .cols { grid-template-columns: 1fr; }
     }
   </style>
 </head>
 <body>
-  <div class="shell">
-    <aside class="side">
-      <div class="brand"><img src="/logo.png" alt="">nautylus</div>
-      <div class="meta">
-        <div>Local property graph database</div>
-        <div id="stats">Loading...</div>
-        <button onclick="refreshAll()">Refresh</button>
-        <button class="secondary" onclick="sample()">Create Sample</button>
+  <main class="app-shell">
+    <header class="topbar">
+      <div class="brand"><img src="/logo.png" alt="nautylus"></div>
+      <div class="query-bar" role="search">
+        <span class="query-prompt">$</span>
+        <textarea id="query" rows="1" spellcheck="false">MATCH (n) RETURN n LIMIT 20</textarea>
+        <button id="runButton" class="primary" type="button" onclick="runQuery()">Run</button>
+        <button id="explainButton" type="button" onclick="explain()">Explain</button>
       </div>
-    </aside>
-    <main class="main">
-      <div class="bar">
-        <h1>Workbench</h1>
-        <span class="status" id="message">Ready</span>
+      <span class="status" id="message">Ready</span>
+    </header>
+
+    <section class="workspace">
+      <div id="graph" class="graph" aria-label="Interactive graph visualization">
+        <div class="graph-toolbar">
+          <button type="button" onclick="fitGraph()">Fit graph</button>
+          <button type="button" onclick="refreshAll()">Refresh</button>
+        </div>
       </div>
-      <section class="panel graph-panel">
-        <svg id="graph" role="img" aria-label="Graph visualization"></svg>
-      </section>
-      <section class="grid">
-        <div class="panel">
-          <h2>Query</h2>
-          <textarea id="query">MATCH (n) RETURN n LIMIT 20</textarea>
-          <div class="row">
-            <button onclick="runQuery()">Run</button>
-            <button class="secondary" onclick="explain()">Explain</button>
-          </div>
+      <aside id="inspector" class="inspector">
+        <div class="inspector-empty">
+          <h2>Inspector</h2>
+          <p>Click a node or relationship to inspect it.</p>
+          <p class="hint">Drag a node to pin it. Click a pinned node to release it. Double-click a node to expand neighbors.</p>
         </div>
-        <div class="panel">
-          <h2>Import Triples</h2>
-          <textarea id="triples">alice	KNOWS	bob
-bob	KNOWS	carol</textarea>
-          <button onclick="importTriples()">Import TSV</button>
-        </div>
-      </section>
-      <section class="grid">
-        <div class="panel">
-          <h2>Schema</h2>
-          <div class="cols"><input id="label" value="Person"><input id="key" value="name"></div>
-          <div class="row">
-            <button onclick="constraint('require')">Require</button>
-            <button onclick="constraint('unique')">Unique</button>
-            <button onclick="indexCreate()">Index</button>
-          </div>
-          <h2>Colors</h2>
-          <div class="cols"><input id="colorLabel" value="Person"><input id="colorValue" type="color" value="#0f766e"></div>
-          <div class="row">
-            <button onclick="setNodeColor()">Apply</button>
-            <button class="secondary" onclick="clearNodeColor()">Reset</button>
-          </div>
-          <pre id="schema"></pre>
-        </div>
-        <div class="panel">
-          <h2>Output</h2>
-          <pre id="output"></pre>
-        </div>
-      </section>
-    </main>
-  </div>
+      </aside>
+    </section>
+
+    <section class="details">
+      <div class="panel">
+        <h2>Output</h2>
+        <pre id="output"></pre>
+      </div>
+    </section>
+  </main>
+
   <script src="/d3.js"></script>
   <script>
+    const NODE_RADIUS = 34;
+    const PARALLEL_GAP = 30;
+    const SELF_LOOP_RADIUS = 42;
+
+    const graphHost = document.getElementById('graph');
+    const inspector = document.getElementById('inspector');
+
     let fullGraph = { nodes: [], links: [] };
     let visibleIds = new Set();
     let nodePositions = new Map();
     let nodeColors = new Map(JSON.parse(localStorage.getItem('nautylus-node-colors') || '[]'));
-    let graphSimulation = null;
+    let nodes = [];
+    let relationships = [];
+    let selected = null;
+    let physicsPaused = false;
     let expansionCount = 0;
-    let graphView = { x: 0, y: 0, k: 1 };
+
+    const svg = d3.select(graphHost).append('svg')
+      .attr('role', 'img')
+      .attr('aria-label', 'Interactive force-directed graph');
+
+    const defs = svg.append('defs');
+    defs.append('marker')
+      .attr('id', 'arrow')
+      .attr('viewBox', '0 -5 10 10')
+      .attr('refX', 8)
+      .attr('refY', 0)
+      .attr('markerWidth', 6)
+      .attr('markerHeight', 6)
+      .attr('orient', 'auto')
+      .attr('markerUnits', 'strokeWidth')
+      .append('path')
+      .attr('d', 'M0,-5L10,0L0,5')
+      .attr('fill', '#a5abb6');
+
+    defs.append('marker')
+      .attr('id', 'arrow-selected')
+      .attr('viewBox', '0 -5 10 10')
+      .attr('refX', 8)
+      .attr('refY', 0)
+      .attr('markerWidth', 6)
+      .attr('markerHeight', 6)
+      .attr('orient', 'auto')
+      .attr('markerUnits', 'strokeWidth')
+      .append('path')
+      .attr('d', 'M0,-5L10,0L0,5')
+      .attr('fill', '#37474f');
+
+    const viewport = svg.append('g').attr('class', 'viewport');
+    const relationshipLayer = viewport.append('g').attr('class', 'relationships');
+    const nodeLayer = viewport.append('g').attr('class', 'nodes');
+
+    const zoom = d3.zoom()
+      .scaleExtent([0.2, 4])
+      .on('zoom', event => viewport.attr('transform', event.transform));
+
+    svg.call(zoom).on('dblclick.zoom', null);
+    svg.on('click', event => {
+      if (event.target === svg.node()) clearSelection();
+    });
+
+    const simulation = d3.forceSimulation()
+      .force('link', d3.forceLink().id(d => d.id).distance(165).strength(.35))
+      .force('charge', d3.forceManyBody().strength(-650))
+      .force('collide', d3.forceCollide().radius(NODE_RADIUS + 20).iterations(2))
+      .force('x', d3.forceX().strength(.035))
+      .force('y', d3.forceY().strength(.035))
+      .on('tick', ticked);
+
+    let relationshipSelection = relationshipLayer.selectAll('g.relationship');
+    let nodeSelection = nodeLayer.selectAll('g.node');
 
     async function req(path, body) {
       const opt = body === undefined ? {} : { method: 'POST', body };
@@ -116,64 +509,24 @@ bob	KNOWS	carol</textarea>
       if (!response.ok) throw new Error(text || response.statusText);
       return text;
     }
+
     function show(text) {
       document.getElementById('output').textContent = text;
       document.getElementById('message').textContent = 'Updated';
     }
+
     async function refreshAll() {
       try {
-        document.getElementById('stats').textContent = await req('/api/stats');
-        document.getElementById('schema').textContent = (await req('/api/constraints')) + (await req('/api/indexes'));
+        document.getElementById('message').textContent = 'Refreshing';
         await drawGraph();
+        document.getElementById('message').textContent = `${fullGraph.nodes.length} nodes, ${fullGraph.links.length} relationships`;
       } catch (error) {
         document.getElementById('message').textContent = error.message;
       }
     }
-    function color(label) {
-      if (nodeColors.has(label)) return nodeColors.get(label);
-      const primary = label.split(',')[0];
-      if (nodeColors.has(primary)) return nodeColors.get(primary);
-      const palette = ['#65a30d', '#0f766e', '#2563eb', '#9333ea', '#db2777', '#ca8a04', '#475569'];
-      let h = 0;
-      for (const ch of label) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-      return palette[h % palette.length];
-    }
-
-    function saveNodeColors() {
-      localStorage.setItem('nautylus-node-colors', JSON.stringify([...nodeColors]));
-    }
 
     function linkId(value) {
       return typeof value === 'object' ? value.id : value;
-    }
-
-    function expandNode(node) {
-      const before = visibleIds.size;
-      const origin = nodePositions.get(node.id) || node;
-      const seedNeighbor = id => {
-        if (nodePositions.has(id)) return;
-        const angle = expansionCount * 2.399963229728653;
-        const radius = 96 + (expansionCount % 3) * 22;
-        expansionCount++;
-        nodePositions.set(id, {
-          x: (origin.x || 0) + Math.cos(angle) * radius,
-          y: (origin.y || 0) + Math.sin(angle) * radius
-        });
-      };
-      for (const link of fullGraph.links) {
-        const source = linkId(link.source);
-        const target = linkId(link.target);
-        if (source === node.id) {
-          visibleIds.add(target);
-          seedNeighbor(target);
-        }
-        if (target === node.id) {
-          visibleIds.add(source);
-          seedNeighbor(source);
-        }
-      }
-      document.getElementById('message').textContent = visibleIds.size > before ? 'Expanded' : 'No more neighbors';
-      renderGraph();
     }
 
     function seedVisibleIds() {
@@ -219,145 +572,561 @@ bob	KNOWS	carol</textarea>
     }
 
     function renderGraph() {
-      const svg = d3.select('#graph');
-      const node = svg.node();
-      const width = node.clientWidth || 800;
-      const height = node.clientHeight || 430;
-      if (graphSimulation) graphSimulation.stop();
-      svg.selectAll('*').remove();
-      svg.attr('viewBox', [0, 0, width, height]);
-      node.oncontextmenu = event => event.preventDefault();
-      const defs = svg.append('defs');
-      defs.append('marker')
-        .attr('id', 'arrow').attr('viewBox', '0 -5 10 10').attr('refX', 30).attr('refY', 0)
-        .attr('markerWidth', 7).attr('markerHeight', 7).attr('orient', 'auto')
-        .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#94a3b8');
-      const nodes = fullGraph.nodes.filter(d => visibleIds.has(d.id)).map(d => {
-        const position = nodePositions.get(d.id);
-        return position ? { ...d, x: position.x, y: position.y } : { ...d };
-      });
-      const links = fullGraph.links
+      nodes = fullGraph.nodes
+        .filter(d => visibleIds.has(d.id))
+        .map((d, index) => {
+          const position = nodePositions.get(d.id);
+          const label = d.label || 'Node';
+          return {
+            id: d.id,
+            labels: label.split(',').filter(Boolean),
+            properties: { id: d.id, caption: d.caption || d.id, label },
+            x: position?.x,
+            y: position?.y,
+            _index: index
+          };
+        });
+
+      relationships = fullGraph.links
         .filter(d => visibleIds.has(linkId(d.source)) && visibleIds.has(linkId(d.target)))
-        .map(d => ({...d, source: linkId(d.source), target: linkId(d.target)}));
+        .map((d, index) => {
+          const source = linkId(d.source);
+          const target = linkId(d.target);
+          return {
+            id: d.id || `${source}:${d.type}:${target}:${index}`,
+            type: d.type || 'RELATED',
+            startNode: source,
+            endNode: target,
+            source,
+            target,
+            properties: { source, target, type: d.type || 'RELATED' }
+          };
+        });
+
       if (!nodes.length) {
-        svg.append('text').attr('x', width / 2).attr('y', height / 2).attr('text-anchor', 'middle').attr('fill', '#64748b').text('No graph data');
+        relationshipLayer.selectAll('*').remove();
+        nodeLayer.selectAll('*').remove();
+        simulation.stop();
+        inspector.innerHTML = '<div class="inspector-empty"><h2>Inspector</h2><p class="hint">No graph data.</p></div>';
         return;
       }
-      const viewport = svg.append('g').attr('class', 'viewport').attr('transform', `translate(${graphView.x},${graphView.y}) scale(${graphView.k})`);
-      svg.call(d3.drag()
-        .filter(event => event.button === 2)
-        .on('start', () => { document.getElementById('message').textContent = 'Panning'; })
-        .on('drag', event => {
-          graphView.x += event.dx;
-          graphView.y += event.dy;
-          viewport.attr('transform', `translate(${graphView.x},${graphView.y}) scale(${graphView.k})`);
-        })
-        .on('end', () => { document.getElementById('message').textContent = 'Ready'; }));
-      svg.on('wheel', event => {
-        event.preventDefault();
-        const scale = event.deltaY < 0 ? 1.12 : 0.89;
-        const next = Math.max(0.25, Math.min(3, graphView.k * scale));
-        const rect = node.getBoundingClientRect();
-        const px = event.clientX - rect.left;
-        const py = event.clientY - rect.top;
-        graphView.x = px - (px - graphView.x) * (next / graphView.k);
-        graphView.y = py - (py - graphView.y) * (next / graphView.k);
-        graphView.k = next;
-        viewport.attr('transform', `translate(${graphView.x},${graphView.y}) scale(${graphView.k})`);
-      }, { passive: false });
-      const simulation = d3.forceSimulation(nodes)
-        .force('link', d3.forceLink(links).id(d => d.id).distance(130))
-        .force('charge', d3.forceManyBody().strength(-520))
-        .force('center', d3.forceCenter(width / 2, height / 2))
-        .force('collide', d3.forceCollide(46));
-      graphSimulation = simulation;
-      const link = viewport.append('g').attr('stroke', '#94a3b8').attr('stroke-width', 1.7)
-        .selectAll('line').data(links).join('line').attr('marker-end', 'url(#arrow)');
-      const linkText = viewport.append('g').selectAll('text').data(links).join('text')
-        .attr('font-size', 11).attr('fill', '#475569').attr('paint-order', 'stroke').attr('stroke', '#fbfcfe').attr('stroke-width', 4)
-        .text(d => d.type);
-      const group = viewport.append('g').selectAll('g').data(nodes).join('g')
-        .on('dblclick', (event, d) => { event.stopPropagation(); expandNode(d); })
-        .call(d3.drag()
-          .filter(event => event.button === 0)
-          .on('start', (event, d) => { if (!event.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-          .on('drag', (event, d) => { d.fx = (event.x - graphView.x) / graphView.k; d.fy = (event.y - graphView.y) / graphView.k; })
-          .on('end', (event, d) => { if (!event.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }));
-      group.append('circle').attr('r', 28).attr('fill', d => color(d.label)).attr('stroke', '#ffffff').attr('stroke-width', 3);
-      group.append('text').attr('text-anchor', 'middle').attr('dy', '-.1em').attr('fill', '#ffffff').attr('font-size', 12).attr('font-weight', 700).text(d => d.caption.slice(0, 12));
-      group.append('text').attr('text-anchor', 'middle').attr('dy', '1.25em').attr('fill', '#e2e8f0').attr('font-size', 9).text(d => d.label.split(',')[0].slice(0, 12));
-      group.append('title').text(d => `${d.caption}\n${d.label}\n#${d.id}`);
-      const clampNode = d => {
-        if (!Number.isFinite(d.x)) d.x = width / 2;
-        if (!Number.isFinite(d.y)) d.y = height / 2;
-        if (d.x < 32) { d.x = 32; d.vx = Math.max(0, d.vx || 0); }
-        if (d.x > width - 32) { d.x = width - 32; d.vx = Math.min(0, d.vx || 0); }
-        if (d.y < 32) { d.y = 32; d.vy = Math.max(0, d.vy || 0); }
-        if (d.y > height - 32) { d.y = height - 32; d.vy = Math.min(0, d.vy || 0); }
-      };
-      simulation.on('tick', () => {
-        nodes.forEach(clampNode);
-        link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-        linkText.attr('x', d => (d.source.x + d.target.x) / 2).attr('y', d => (d.source.y + d.target.y) / 2);
-        group.attr('transform', d => {
-          nodePositions.set(d.id, { x: d.x, y: d.y });
-          const x = d.x;
-          const y = d.y;
-          return `translate(${x},${y})`;
+
+      const width = graphHost.clientWidth || 900;
+      const height = graphHost.clientHeight || 650;
+      nodes.forEach((d, index) => {
+        if (Number.isFinite(d.x) && Number.isFinite(d.y)) return;
+        const angle = (index / Math.max(1, nodes.length)) * Math.PI * 2;
+        d.x = width / 2 + Math.cos(angle) * 170;
+        d.y = height / 2 + Math.sin(angle) * 140;
+      });
+
+      updateGraph(true);
+      refreshSelectionStyles();
+      setTimeout(() => fitGraph(500), 350);
+    }
+
+    function prepareRelationships() {
+      relationships.forEach(rel => {
+        rel.source = typeof rel.source === 'object' ? rel.source.id : (rel.source ?? rel.startNode);
+        rel.target = typeof rel.target === 'object' ? rel.target.id : (rel.target ?? rel.endNode);
+      });
+
+      const groups = d3.group(relationships, rel => [rel.source, rel.target].sort().join('::'));
+      groups.forEach(group => {
+        if (group.length === 1) {
+          group[0]._curveSlot = 0;
+          group[0]._parallelCount = 1;
+          return;
+        }
+
+        const canonicalA = [group[0].source, group[0].target].sort()[0];
+        const forward = group.filter(rel => rel.source === canonicalA && rel.source !== rel.target);
+        const backward = group.filter(rel => rel.target === canonicalA && rel.source !== rel.target);
+        const loops = group.filter(rel => rel.source === rel.target);
+        const slots = symmetricSlots(group.length);
+        let slotIndex = 0;
+        const positive = slots.filter(v => v > 0);
+        const negative = slots.filter(v => v < 0);
+        const zero = slots.filter(v => v === 0);
+
+        forward.forEach((rel, i) => rel._curveSlot = positive[i] ?? zero.shift() ?? negative.shift() ?? slots[slotIndex++]);
+        backward.forEach((rel, i) => rel._curveSlot = negative[i] ?? zero.shift() ?? positive.shift() ?? slots[slotIndex++]);
+        loops.forEach((rel, i) => rel._curveSlot = i + 1);
+
+        const used = new Set();
+        group.forEach((rel, i) => {
+          if (used.has(rel._curveSlot) || rel._curveSlot === undefined) {
+            rel._curveSlot = slots.find(slot => !used.has(slot)) ?? i + 1;
+          }
+          used.add(rel._curveSlot);
+          rel._parallelCount = group.length;
         });
       });
     }
+
+    function symmetricSlots(count) {
+      if (count <= 1) return [0];
+      const slots = [];
+      if (count % 2 === 1) slots.push(0);
+      for (let i = 1; slots.length < count; i += 1) {
+        slots.push(i);
+        if (slots.length < count) slots.push(-i);
+      }
+      return slots;
+    }
+
+    function updateGraph(reheat = true) {
+      prepareRelationships();
+
+      relationshipSelection = relationshipLayer
+        .selectAll('g.relationship')
+        .data(relationships, d => d.id)
+        .join(
+          enter => {
+            const g = enter.append('g')
+              .attr('class', 'relationship')
+              .on('click', (event, d) => {
+                event.stopPropagation();
+                selectRelationship(d);
+              })
+              .on('mouseenter', (_, d) => highlightNeighborhood(d))
+              .on('mouseleave', clearHighlight);
+
+            g.append('path').attr('class', 'relationship-hit');
+            g.append('path').attr('class', 'relationship-path').attr('marker-end', 'url(#arrow)');
+            g.append('rect').attr('class', 'relationship-label-bg');
+            g.append('text').attr('class', 'relationship-label').text(d => d.type);
+            return g;
+          },
+          update => {
+            update.select('.relationship-label').text(d => d.type);
+            return update;
+          },
+          exit => exit.remove()
+        );
+
+      nodeSelection = nodeLayer
+        .selectAll('g.node')
+        .data(nodes, d => d.id)
+        .join(
+          enter => {
+            const g = enter.append('g')
+              .attr('class', 'node')
+              .call(nodeDrag())
+              .on('click', (event, d) => {
+                event.stopPropagation();
+                if (event.defaultPrevented) return;
+                if (d.fx != null && d._wasDragged !== true) {
+                  d.fx = null;
+                  d.fy = null;
+                  d3.select(event.currentTarget).select('.pin-dot').attr('visibility', 'hidden');
+                  if (!physicsPaused) simulation.alpha(.45).restart();
+                }
+                d._wasDragged = false;
+                selectNode(d);
+              })
+              .on('dblclick', (event, d) => {
+                event.stopPropagation();
+                expandNode(d);
+              })
+              .on('mouseenter', (_, d) => highlightNeighborhood(d))
+              .on('mouseleave', clearHighlight);
+
+            g.append('circle').attr('class', 'node-ring').attr('r', NODE_RADIUS + 5);
+            g.append('circle')
+              .attr('class', 'node-circle')
+              .attr('r', NODE_RADIUS)
+              .attr('fill', d => colorFor(d).fill)
+              .attr('stroke', d => colorFor(d).stroke);
+            g.append('text').attr('class', 'node-label').attr('y', -3).text(d => ellipsis(nodeTitle(d), 12));
+            g.append('text').attr('class', 'node-sublabel').attr('y', 13).text(d => d.labels?.[0] ?? 'Node');
+            g.append('circle').attr('class', 'pin-dot').attr('r', 5).attr('cx', NODE_RADIUS - 4).attr('cy', -(NODE_RADIUS - 4)).attr('visibility', 'hidden');
+            return g;
+          },
+          update => {
+            update.select('.node-circle')
+              .attr('fill', d => colorFor(d).fill)
+              .attr('stroke', d => colorFor(d).stroke);
+            update.select('.node-label').text(d => ellipsis(nodeTitle(d), 12));
+            update.select('.node-sublabel').text(d => d.labels?.[0] ?? 'Node');
+            return update;
+          },
+          exit => exit.remove()
+        );
+
+      simulation.nodes(nodes);
+      simulation.force('link').links(relationships);
+
+      if (reheat && !physicsPaused) simulation.alpha(.9).restart();
+    }
+
+    function nodeDrag() {
+      let startX = 0;
+      let startY = 0;
+      return d3.drag()
+        .on('start', (event, d) => {
+          startX = event.x;
+          startY = event.y;
+          d._wasDragged = false;
+          if (!event.active && !physicsPaused) simulation.alphaTarget(.25).restart();
+          d.fx = d.x;
+          d.fy = d.y;
+        })
+        .on('drag', (event, d) => {
+          if (Math.hypot(event.x - startX, event.y - startY) > 3) d._wasDragged = true;
+          d.fx = event.x;
+          d.fy = event.y;
+        })
+        .on('end', (event, d) => {
+          if (!event.active && !physicsPaused) simulation.alphaTarget(0);
+          nodeSelection.filter(node => node.id === d.id).select('.pin-dot').attr('visibility', 'visible');
+        });
+    }
+
+    function ticked() {
+      nodeSelection.attr('transform', d => {
+        nodePositions.set(d.id, { x: d.x, y: d.y });
+        return `translate(${d.x},${d.y})`;
+      });
+
+      relationshipSelection.each(function(d) {
+        const g = d3.select(this);
+        const pathD = relationshipPath(d);
+        g.select('.relationship-path').attr('d', pathD);
+        g.select('.relationship-hit').attr('d', pathD);
+        const pathNode = g.select('.relationship-path').node();
+        if (!pathNode) return;
+        const length = pathNode.getTotalLength();
+        const midpoint = pathNode.getPointAtLength(length / 2);
+        const label = g.select('.relationship-label').attr('x', midpoint.x).attr('y', midpoint.y);
+        const width = Math.max(20, label.node().getComputedTextLength() + 10);
+        g.select('.relationship-label-bg')
+          .attr('x', midpoint.x - width / 2)
+          .attr('y', midpoint.y - 8)
+          .attr('width', width)
+          .attr('height', 16);
+      });
+    }
+
+    function relationshipPath(d) {
+      const source = d.source;
+      const target = d.target;
+
+      if (source.id === target.id) {
+        const x = source.x;
+        const y = source.y;
+        const loop = SELF_LOOP_RADIUS + Math.abs(d._curveSlot || 1) * 9;
+        const startX = x + NODE_RADIUS * .55;
+        const startY = y - NODE_RADIUS * .82;
+        const endX = x - NODE_RADIUS * .55;
+        const endY = y - NODE_RADIUS * .82;
+        return `M${startX},${startY} C${x + loop},${y - loop * 1.55} ${x - loop},${y - loop * 1.55} ${endX},${endY}`;
+      }
+
+      const dx = target.x - source.x;
+      const dy = target.y - source.y;
+      const distance = Math.max(1, Math.hypot(dx, dy));
+      const ux = dx / distance;
+      const uy = dy / distance;
+      const directionSign = String(source.id) <= String(target.id) ? 1 : -1;
+      const nx = -uy * directionSign;
+      const ny = ux * directionSign;
+      const sx = source.x + ux * (NODE_RADIUS + 2);
+      const sy = source.y + uy * (NODE_RADIUS + 2);
+      const tx = target.x - ux * (NODE_RADIUS + 9);
+      const ty = target.y - uy * (NODE_RADIUS + 9);
+      const slot = d._curveSlot || 0;
+      if (slot === 0) return `M${sx},${sy} L${tx},${ty}`;
+      const bend = slot * PARALLEL_GAP;
+      const mx = (sx + tx) / 2 + nx * bend;
+      const my = (sy + ty) / 2 + ny * bend;
+      return `M${sx},${sy} Q${mx},${my} ${tx},${ty}`;
+    }
+
+    function colorFor(d) {
+      const label = d.labels?.[0] || 'Node';
+      const fill = color(label);
+      return { fill, stroke: shade(fill, -24) };
+    }
+
+    function color(label) {
+      if (nodeColors.has(label)) return nodeColors.get(label);
+      const palette = ['#68bdf6', '#6dce9e', '#fcea7e', '#f2baf6', '#ffc766', '#93c5fd', '#a5abb6'];
+      let h = 0;
+      for (const ch of label) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+      return palette[h % palette.length];
+    }
+
+    function shade(hex, amount) {
+      const value = parseInt(hex.slice(1), 16);
+      const clamp = n => Math.max(0, Math.min(255, n));
+      const r = clamp((value >> 16) + amount);
+      const g = clamp(((value >> 8) & 255) + amount);
+      const b = clamp((value & 255) + amount);
+      return `#${((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1)}`;
+    }
+
+    function nodeTitle(d) {
+      return d.properties?.caption ?? d.properties?.name ?? d.id;
+    }
+
+    function ellipsis(value, max) {
+      const text = String(value);
+      return text.length <= max ? text : `${text.slice(0, max - 1)}...`;
+    }
+
+    function selectNode(d) {
+      const label = d.labels?.[0] || 'Node';
+      selected = { kind: 'node', id: d.id };
+      refreshSelectionStyles();
+      inspector.innerHTML = `
+        <span class="badge">${escapeHtml(d.labels?.join(':') || 'Node')}</span>
+        <h2>${escapeHtml(nodeTitle(d))}</h2>
+        <p><strong>Node ID:</strong> ${escapeHtml(d.id)}</p>
+        <h3>Color</h3>
+        <div class="color-editor">
+          <input id="inspectorColor" type="color" value="${escapeHtml(color(label))}" aria-label="Node label color">
+          <div class="row">
+            <button type="button" onclick="applyInspectorColor()">Apply</button>
+            <button type="button" onclick="resetInspectorColor()">Reset</button>
+          </div>
+        </div>
+        <p class="hint">Applies to all ${escapeHtml(label)} nodes.</p>
+        <h3>Properties</h3>
+        ${propertyTable(d.properties)}
+      `;
+    }
+
+    function selectRelationship(d) {
+      selected = { kind: 'relationship', id: d.id };
+      refreshSelectionStyles();
+      inspector.innerHTML = `
+        <span class="badge">${escapeHtml(d.type)}</span>
+        <h2>${escapeHtml(nodeTitle(d.source))} -> ${escapeHtml(nodeTitle(d.target))}</h2>
+        <p><strong>Relationship ID:</strong> ${escapeHtml(d.id)}</p>
+        <p><strong>Curve slot:</strong> ${escapeHtml(String(d._curveSlot ?? 0))}</p>
+        <h3>Properties</h3>
+        ${propertyTable(d.properties)}
+      `;
+    }
+
+    function propertyTable(properties = {}) {
+      const entries = Object.entries(properties);
+      if (!entries.length) return '<p class="hint">No properties.</p>';
+      return `<table class="property-table"><tbody>${entries.map(([key, value]) => `
+        <tr><th>${escapeHtml(key)}</th><td>${escapeHtml(formatValue(value))}</td></tr>
+      `).join('')}</tbody></table>`;
+    }
+
+    function formatValue(value) {
+      return typeof value === 'string' ? value : JSON.stringify(value);
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
+    }
+
+    function clearSelection() {
+      selected = null;
+      refreshSelectionStyles();
+      inspector.innerHTML = `
+        <div class="inspector-empty">
+          <h2>Inspector</h2>
+          <p>Click a node or relationship to inspect it.</p>
+          <p class="hint">Drag a node to pin it. Click a pinned node to release it. Double-click a node to expand neighbors.</p>
+        </div>`;
+    }
+
+    function refreshSelectionStyles() {
+      nodeSelection.classed('selected', d => selected?.kind === 'node' && selected.id === d.id);
+      relationshipSelection
+        .classed('selected', d => selected?.kind === 'relationship' && selected.id === d.id)
+        .select('.relationship-path')
+        .attr('marker-end', d => selected?.kind === 'relationship' && selected.id === d.id ? 'url(#arrow-selected)' : 'url(#arrow)');
+    }
+
+    function highlightNeighborhood(subject) {
+      const nodeIds = new Set();
+      const relationshipIds = new Set();
+      if (subject.labels) {
+        nodeIds.add(subject.id);
+        relationships.forEach(rel => {
+          const sourceId = typeof rel.source === 'object' ? rel.source.id : rel.source;
+          const targetId = typeof rel.target === 'object' ? rel.target.id : rel.target;
+          if (sourceId === subject.id || targetId === subject.id) {
+            nodeIds.add(sourceId);
+            nodeIds.add(targetId);
+            relationshipIds.add(rel.id);
+          }
+        });
+      } else {
+        nodeIds.add(subject.source.id);
+        nodeIds.add(subject.target.id);
+        relationshipIds.add(subject.id);
+      }
+      nodeSelection.classed('dimmed', d => !nodeIds.has(d.id));
+      relationshipSelection.classed('dimmed', d => !relationshipIds.has(d.id));
+    }
+
+    function clearHighlight() {
+      nodeSelection.classed('dimmed', false);
+      relationshipSelection.classed('dimmed', false);
+    }
+
+    function expandNode(node) {
+      const before = visibleIds.size;
+      const origin = nodePositions.get(node.id) || node;
+      const seedNeighbor = id => {
+        if (nodePositions.has(id)) return;
+        const angle = expansionCount * 2.399963229728653;
+        const radius = 96 + (expansionCount % 3) * 22;
+        expansionCount++;
+        nodePositions.set(id, {
+          x: (origin.x || 0) + Math.cos(angle) * radius,
+          y: (origin.y || 0) + Math.sin(angle) * radius
+        });
+      };
+      for (const link of fullGraph.links) {
+        const source = linkId(link.source);
+        const target = linkId(link.target);
+        if (source === node.id) {
+          visibleIds.add(target);
+          seedNeighbor(target);
+        }
+        if (target === node.id) {
+          visibleIds.add(source);
+          seedNeighbor(source);
+        }
+      }
+      document.getElementById('message').textContent = visibleIds.size > before ? 'Expanded' : 'No more neighbors';
+      renderGraph();
+    }
+
+    function fitGraph(duration = 500) {
+      if (!nodes.length) return;
+      const bounds = viewport.node().getBBox();
+      const width = graphHost.clientWidth;
+      const height = graphHost.clientHeight;
+      if (!bounds.width || !bounds.height || !width || !height) return;
+      const padding = 80;
+      const scale = Math.min(2.2, .92 / Math.max((bounds.width + padding) / width, (bounds.height + padding) / height));
+      const x = width / 2 - scale * (bounds.x + bounds.width / 2);
+      const y = height / 2 - scale * (bounds.y + bounds.height / 2);
+      svg.transition().duration(duration).call(zoom.transform, d3.zoomIdentity.translate(x, y).scale(scale));
+    }
+
+    function resetLayout() {
+      nodes.forEach(d => {
+        d.fx = null;
+        d.fy = null;
+        d.x = NaN;
+        d.y = NaN;
+        d.vx = 0;
+        d.vy = 0;
+      });
+      nodePositions.clear();
+      nodeSelection.select('.pin-dot').attr('visibility', 'hidden');
+      physicsPaused = false;
+      simulation.alpha(1).restart();
+      setTimeout(() => fitGraph(500), 350);
+    }
+
     async function runQuery() {
       try {
         const query = document.getElementById('query').value;
         const output = await req('/api/query', query);
-        const ids = (await req('/api/query-nodes', query)).split(/\s+/).filter(Boolean);
         show(output);
         await drawGraph(false, false);
-        const validIds = new Set(fullGraph.nodes.map(d => d.id));
-        visibleIds = new Set(ids.filter(id => validIds.has(id)));
+        try {
+          const ids = (await req('/api/query-nodes', query)).split(/\s+/).filter(Boolean);
+          const validIds = new Set(fullGraph.nodes.map(d => d.id));
+          visibleIds = new Set(ids.filter(id => validIds.has(id)));
+        } catch (_) {
+          visibleIds.clear();
+          seedVisibleIds();
+        }
         renderGraph();
+      } catch (error) {
+        show(error.message);
       }
-      catch (error) { show(error.message); }
     }
+
     async function explain() {
       try { show(await req('/api/explain', document.getElementById('query').value)); }
       catch (error) { show(error.message); }
     }
-    async function importTriples() {
-      try { show(await req('/api/import-triples', document.getElementById('triples').value)); visibleIds.clear(); nodePositions.clear(); expansionCount = 0; await refreshAll(); }
-      catch (error) { show(error.message); }
-    }
+
     async function sample() {
-      try { show(await req('/api/sample', '')); visibleIds.clear(); nodePositions.clear(); expansionCount = 0; await refreshAll(); }
-      catch (error) { show(error.message); }
+      try {
+        show(await req('/api/sample', ''));
+        visibleIds.clear();
+        nodePositions.clear();
+        expansionCount = 0;
+        await refreshAll();
+      } catch (error) {
+        show(error.message);
+      }
     }
-    function pair() {
-      return document.getElementById('label').value + '\t' + document.getElementById('key').value;
+
+    function saveNodeColors() {
+      localStorage.setItem('nautylus-node-colors', JSON.stringify([...nodeColors]));
     }
-    async function constraint(kind) {
-      try { show(await req('/api/constraint-' + kind, pair())); await refreshAll(); }
-      catch (error) { show(error.message); }
+
+    function selectedNode() {
+      if (selected?.kind !== 'node') return null;
+      return nodes.find(node => node.id === selected.id) || null;
     }
-    async function indexCreate() {
-      try { show(await req('/api/index-create', pair())); await refreshAll(); }
-      catch (error) { show(error.message); }
-    }
-    function setNodeColor() {
-      const label = document.getElementById('colorLabel').value.trim();
-      const value = document.getElementById('colorValue').value;
-      if (!label) return;
+
+    function applyInspectorColor() {
+      const node = selectedNode();
+      const value = document.getElementById('inspectorColor')?.value;
+      if (!node || !value) return;
+      const label = node.labels?.[0] || 'Node';
       nodeColors.set(label, value);
       saveNodeColors();
-      renderGraph();
+      updateGraph(false);
+      refreshSelectionStyles();
+      selectNode(node);
     }
-    function clearNodeColor() {
-      const label = document.getElementById('colorLabel').value.trim();
-      if (!label) return;
+
+    function resetInspectorColor() {
+      const node = selectedNode();
+      if (!node) return;
+      const label = node.labels?.[0] || 'Node';
       nodeColors.delete(label);
       saveNodeColors();
-      renderGraph();
+      updateGraph(false);
+      refreshSelectionStyles();
+      selectNode(node);
     }
+
+    const queryInput = document.getElementById('query');
+
+    function resizeQueryInput() {
+      queryInput.style.height = '34px';
+      queryInput.style.height = `${Math.min(queryInput.scrollHeight, 140)}px`;
+    }
+
+    queryInput.addEventListener('input', resizeQueryInput);
+    queryInput.addEventListener('keydown', event => {
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') runQuery();
+    });
+    resizeQueryInput();
+
+    const resizeObserver = new ResizeObserver(() => {
+      const width = graphHost.clientWidth;
+      const height = graphHost.clientHeight;
+      simulation.force('x', d3.forceX(width / 2).strength(.035));
+      simulation.force('y', d3.forceY(height / 2).strength(.035));
+      if (!physicsPaused) simulation.alpha(.12).restart();
+    });
+    resizeObserver.observe(graphHost);
+
     refreshAll();
   </script>
 </body>

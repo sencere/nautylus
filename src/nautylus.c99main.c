@@ -254,6 +254,12 @@ static void capture_query(FILE *f, void *ctx) {
     q->status = ng_query_print(q->g, q->query, f);
 }
 
+typedef struct { ng_graph *g; const char *query; ng_status status; int mutated; } execute_capture;
+static void capture_execute(FILE *f, void *ctx) {
+    execute_capture *q = (execute_capture *)ctx;
+    q->status = ng_query_execute(q->g, q->query, f, &q->mutated);
+}
+
 static int capture_query_node_id(ng_node_id node, void *ctx) {
     FILE *f = (FILE *)ctx;
     return fprintf(f, "%llu\n", (unsigned long long)node) >= 0;
@@ -280,6 +286,23 @@ static char *capture_graph_text(const ng_graph *g, const char *kind, const char 
         *status = qc.status;
         return 0;
     }
+    return out;
+}
+
+static char *capture_graph_execute(ng_graph *g, const char *query, int *mutated, ng_status *status) {
+    execute_capture qc;
+    char *out;
+    qc.g = g;
+    qc.query = query;
+    qc.status = NG_OK;
+    qc.mutated = 0;
+    out = run_text_capture(status, capture_execute, &qc);
+    if (*status == NG_OK && qc.status != NG_OK) {
+        free(out);
+        *status = qc.status;
+        return 0;
+    }
+    if (mutated) *mutated = qc.mutated;
     return out;
 }
 
@@ -513,7 +536,11 @@ static void handle_api(int fd, const char *db_path, const char *route, char *bod
     if (!strcmp(route, "/api/stats")) out = capture_graph_text(g, "stats", 0, &s);
     else if (!strcmp(route, "/api/constraints")) out = capture_graph_text(g, "constraints", 0, &s);
     else if (!strcmp(route, "/api/indexes")) out = capture_graph_text(g, "indexes", 0, &s);
-    else if (!strcmp(route, "/api/query")) out = capture_graph_text(g, "query", body, &s);
+    else if (!strcmp(route, "/api/query")) {
+        int mutated = 0;
+        out = capture_graph_execute(g, body, &mutated, &s);
+        if (s == NG_OK && mutated) s = ng_save(g);
+    }
     else if (!strcmp(route, "/api/query-nodes")) out = capture_graph_text(g, "query-nodes", body, &s);
     else if (!strcmp(route, "/api/explain")) {
         out = (char *)malloc(512);
