@@ -8,7 +8,7 @@
 
 `nautylus` is intended for small embedded applications, command-line tools, tests, and data-processing workflows that need a persistent property graph without running a database server or adding an external dependency.
 
-**Status:** Usable alpha. The implemented subset is tested and usable, but multi-process writer coordination and the web interface are not yet implemented. A narrow MiniCypher query subset, transactions, exact-match indexes, and persisted required/unique property constraints exist as explicit C APIs. See [STATUS.md](STATUS.md) for detailed implementation evidence.
+**Status:** Usable alpha. The implemented subset is tested and usable, but multi-process writer coordination, large-graph performance work, and full Cypher compatibility are not claimed yet. MiniCypher now includes read clauses, write clauses, parameters, `WITH`, `OPTIONAL MATCH`, aggregates, ordering, rollback-protected writes, exact-match indexes, persisted required/unique property constraints, graph analytics APIs, and a local web workbench. See [STATUS.md](STATUS.md) for detailed implementation evidence.
 
 `nautylus` is inspired by Neo4j's property-graph model, but it does not implement Neo4j storage formats, Bolt, or full Cypher.
 
@@ -164,8 +164,8 @@ Notes:
 * `nautylus indexes` lists stored node-index metadata.
 * `nautylus bench` creates a deterministic benchmark graph, saves/reopens it, validates it, builds an exact-match node index, and prints local timing.
 * `nautylus serve` starts a local browser workbench for querying, importing triples, creating sample data, and managing simple schema metadata.
-* `nautylus search` runs the current MiniCypher subset and prints matching node IDs.
-* `nautylus query` runs the current MiniCypher subset and prints matching node IDs.
+* `nautylus search` runs the current MiniCypher subset.
+* `nautylus query` runs the current MiniCypher subset.
 * `nautylus analyze` and `nautylus analyse` validate the database and print graph counts.
 * `nautylus explain` prints the simple selected query plan.
 * Exit status is `0` on success and non-zero on failure.
@@ -242,9 +242,36 @@ fail:
 
 More API details are in [docs/api.md](docs/api.md).
 
+## Graph Analytics API
+
+The C API includes an initial dependency-free analytics layer for small in-memory graphs:
+
+```c
+ng_node_score scores[128];
+size_t count = 0;
+
+ng_pagerank(g, knows, 0.85, 25, scores, 128, &count);
+ng_degree_centrality(g, NG_DIRECTION_EITHER, knows, scores, 128, &count);
+```
+
+Implemented algorithms:
+
+* degree centrality: incoming, outgoing, or either direction;
+* PageRank: directed, unweighted, with optional relationship-type filter;
+* weakly connected components;
+* strongly connected components;
+* triangle count;
+* local clustering coefficient;
+* link prediction basics: common neighbors, preferential attachment, total neighbors;
+* topological sort with `NG_EXISTS` returned for cyclic graphs.
+
+All analytics APIs operate on the current in-memory graph and write results into caller-owned arrays. Pass `type = 0` to include all relationship types, or a relationship symbol ID to filter by type. If the output capacity is too small, the call returns `NG_LIMIT` and reports the required count when an `out_count` pointer is supplied.
+
+Heavier algorithms such as Dijkstra/A*, Louvain/Leiden, KNN, embeddings, max flow, weighted paths, and large-scale optimized centrality are not implemented yet.
+
 ## MiniCypher Subset
 
-The current query parser intentionally supports node matches and bounded directed relationship matches:
+The current query parser intentionally supports a practical subset of Cypher, not full Neo4j Cypher. Supported read patterns include node matches, multi-hop relationship matches, multi-node paths, `WHERE`, `WITH`, `OPTIONAL MATCH`, aggregation, `ORDER BY`, `SKIP`, and `LIMIT`:
 
 ```text
 MATCH (n) RETURN n
@@ -259,9 +286,62 @@ MATCH (n)-[:TYPE]->(m) RETURN m
 MATCH (n)-[:TYPE*1..3]->(m) RETURN m
 MATCH (n)-[:TYPE]->(m) RETURN n.key, m.key
 MATCH (n:Label)-[:TYPE]->(m:Label) WHERE m.key = "value" RETURN n LIMIT 10
+MATCH (a:Person) WITH a MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name
+MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name
+MATCH (a:Person) RETURN a.city, count(a) AS people ORDER BY people DESC
 ```
 
-Supported predicate literals are strings, integers, booleans, and `null`. Query results are deterministic in internal scan order. The CLI can return node IDs with `RETURN n`/`RETURN m`, explicit IDs with `RETURN n.id`, node-property projections with `RETURN n.key` or `RETURN m.key`, and tab-separated multi-column projections. Relationship patterns are directed and support exact or bounded hop counts from 1 to 64, such as `*2` or `*1..3`. Mutation queries, aggregation, and full Cypher semantics are not implemented yet.
+Supported scalar values are strings, integers, doubles, booleans, `null`, and lists produced by `collect(...)`. Predicate support includes `=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `IS NULL`, `IS NOT NULL`, `AND`, `OR`, `NOT`, and parentheses. Relationship reads support `->`, `<-`, and undirected `-[]-` patterns. Exact or bounded hop counts from 1 to 64 are supported in read relationship patterns, such as `*2` or `*1..3`.
+
+Projection support includes variables, IDs, property access, literals, parameters, simple arithmetic, aliases with `AS`, `DISTINCT`, and tab-separated multi-column output. `ORDER BY` works after `WITH` and final `RETURN`, supports multiple keys and `ASC`/`DESC`, and executes after projection/aggregation and `DISTINCT`, before `SKIP`/`LIMIT`. Null ordering is deterministic: nulls sort last for ascending order and first for descending order.
+
+Aggregate support:
+
+```text
+MATCH (a:Person) RETURN count(*)
+MATCH (a:Person) RETURN count(a), sum(a.age), collect(a.name)
+MATCH (a:Person) RETURN a.city, count(a)
+MATCH (a:Person) WITH a.city AS city, count(a) AS people WHERE people > 1 RETURN city, people
+```
+
+Supported aggregates are `count(*)`, `count(expr)`, `sum(expr)`, and `collect(expr)`. `count(expr)`, `sum(expr)`, and `collect(expr)` ignore null values. `sum(...)` returns `null` when there are no non-null numeric inputs. `DISTINCT` is supported inside `count(...)` and `collect(...)`.
+
+Write queries are rollback-protected by the transaction layer:
+
+```text
+CREATE (a:Person {name: "Anton"})-[:KNOWS]->(b:Person {name: "Stan"})
+CREATE (a:Person {name: "A"}), (b:Person {name: "B"})
+MATCH (a:Person) WHERE a.name = "A" SET a.city = "Berlin", a.score = 10
+MATCH (a:Person)-[r:KNOWS]->(b:Person) DELETE r, b
+MERGE (a:Person {name: "A"}), (b:Person {name: "B"}), (a)-[:KNOWS]->(b)
+```
+
+`CREATE` supports single connected patterns and comma-separated pattern lists. `MERGE` supports node patterns, relationship patterns, comma-separated pattern lists, forward/reverse relationships, properties, and variable binding across patterns. Unconstrained new MERGE nodes without a label or property map are rejected. `SET` supports comma-separated property assignments with scalar expressions on the right-hand side. `DELETE` supports comma-separated node and relationship variables.
+
+Parameterized execution is available through the C API:
+
+```c
+ng_parameter params[1];
+params[0].name = "name";
+params[0].value.type = NG_VALUE_STRING;
+params[0].value.length = 5;
+params[0].value.as.string = "Alice";
+
+ng_query_execute_params(g,
+    "MATCH (a:Person) WHERE a.name = $name RETURN a",
+    params, 1, stdout, NULL);
+```
+
+Named parameters use `$name` syntax and can appear anywhere scalar expressions are accepted: `WHERE`, property maps, `RETURN`, `WITH`, `SET`, `CREATE`, and `MERGE`. Missing parameters return a query error; extra supplied parameters are ignored.
+
+Important MiniCypher limitations:
+
+* It is not a full Cypher parser.
+* `ORDER BY` uses strict post-projection scope for `WITH`; hidden projection visibility is not implemented.
+* Lists and complex values are printed and compared for equality, but are not meaningfully ordered.
+* Variable-length relationship patterns are supported in read `MATCH`, but not in `CREATE`/`MERGE` write patterns.
+* Richer `SET` forms such as map replacement/merge are not implemented.
+* `ON CREATE`, `ON MATCH`, `REMOVE`, `DETACH DELETE`, `UNWIND`, subqueries, path values, and procedure calls are not implemented.
 
 Example:
 
@@ -271,6 +351,9 @@ Example:
 ./build/nautylus query graph.ng 'MATCH (n)-[:KNOWS]->(m) RETURN m'
 ./build/nautylus query graph.ng 'MATCH (n)-[:KNOWS*1..3]->(m) RETURN m'
 ./build/nautylus query graph.ng 'MATCH (n:Person) WHERE id(n) = 1 RETURN n.name'
+./build/nautylus query graph.ng 'MATCH (n:Person) RETURN n.name ORDER BY n.name DESC LIMIT 5'
+./build/nautylus query graph.ng 'MATCH (n:Person) RETURN n.city, count(n)'
+./build/nautylus query graph.ng 'CREATE (a:Person {name: "Anton"})-[:KNOWS]->(b:Person {name: "Stan"}) RETURN a.name, b.name'
 ```
 
 ## Web Workbench
@@ -283,7 +366,7 @@ Start the local web interface:
 
 Open `http://127.0.0.1:6180`. The workbench serves static assets from `resources/web` and `resources/logo`, and operates on the database path passed to `serve`.
 
-The current workbench supports stats, MiniCypher query/explain, triple TSV import, sample graph creation, required/unique node-property constraints, and exact-match index metadata.
+The current workbench supports stats, MiniCypher query/explain, triple TSV import, sample graph creation, required/unique node-property constraints, exact-match index metadata, interactive graph rendering, a top query input, and a right-side node information panel with editable colors.
 
 ## File Formats
 
@@ -415,9 +498,9 @@ Not currently claimed:
 Not implemented yet:
 
 * durable transaction journal;
-* HTTP/web interface;
 * multi-process writer coordination;
-* mutation queries and aggregation;
+* full Cypher compatibility;
+* weighted path algorithms and large-scale graph analytics;
 * complete two-file export crash recovery;
 * fuzzing and profiling harnesses.
 
@@ -429,7 +512,8 @@ Capability summary:
 | --- | --- | --- |
 | Core graph | CRUD, labels, typed properties, property deletion, directed relationships, validation | Incremental adjacency maintenance |
 | Persistence | Single-file snapshots, checksum, strict load checks, atomic replacement where supported | Generations, per-section checksums, directory fsync, migrations |
-| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, node and bounded relationship MiniCypher, ID predicates, property and multi-column projection | Aggregation, mutation queries |
+| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `OPTIONAL MATCH`, parameters, aggregation, `ORDER BY`, rollback-protected `CREATE`/`MERGE`/`SET`/`DELETE` | Full Cypher compatibility, richer write forms, path values, subqueries |
+| Analytics | Degree centrality, PageRank, weak/strong components, triangle count, local clustering coefficient, common-neighbor style link prediction, topological sort | Weighted paths, community detection, KNN/similarity, embeddings, max flow, scalable algorithm implementations |
 | Import/export | Triple TSV/CSV, property-graph TSV, CLI workflows, rollback on import failure | Stronger two-file crash recovery, richer CLI flags |
 | Release quality | Strict C99 tests, ASan/UBSan run with LeakSanitizer disabled in this environment, documented tested limits, small local performance baseline, local web workbench smoke coverage | CI, fuzzing, profiling |
 
@@ -447,11 +531,11 @@ Detailed evidence is in [STATUS.md](STATUS.md).
 * [resources/web/index.html](resources/web/index.html): local web workbench.
 * [tests/test_nautylus.c](tests/test_nautylus.c): regression suite.
 * [examples/basic.c](examples/basic.c): minimal embeddable C API example.
+* [LICENSE](LICENSE): MIT license.
 * `agent.md`: full project specification and roadmap.
 
 Planned project files:
 
-* `LICENSE`
 * `CONTRIBUTING.md`
 * `CHANGELOG.md`
 * `SECURITY.md`
