@@ -1,0 +1,364 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>nautylus</title>
+  <style>
+    :root {
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: #1b1f23;
+      background: #f4f6f8;
+    }
+    body { margin: 0; }
+    .shell { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
+    .side { background: #17202a; color: #f8fafc; padding: 24px 20px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-size: 20px; font-weight: 700; }
+    .brand img { width: 34px; height: 34px; }
+    .meta { margin-top: 24px; display: grid; gap: 10px; color: #cbd5e1; font-size: 13px; }
+    .main { padding: 24px; display: grid; gap: 18px; }
+    .bar { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
+    .grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 18px; }
+    .panel { background: white; border: 1px solid #d9e0e7; border-radius: 8px; padding: 16px; }
+    .panel.graph-panel { min-height: 520px; padding: 0; overflow: hidden; position: relative; }
+    #graph { width: 100%; height: 520px; display: block; background: #fbfcfe; cursor: default; touch-action: none; }
+    .panel h2 { font-size: 15px; margin: 0 0 12px; color: #111827; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    button { border: 1px solid #0f766e; background: #0f766e; color: white; border-radius: 6px; padding: 8px 11px; font-weight: 650; cursor: pointer; }
+    button.secondary { background: white; color: #0f766e; }
+    input, textarea { width: 100%; box-sizing: border-box; border: 1px solid #cbd5e1; border-radius: 6px; padding: 9px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    textarea { min-height: 110px; resize: vertical; }
+    .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    input[type="color"] { min-height: 36px; padding: 3px; }
+    pre { margin: 0; white-space: pre-wrap; background: #0f172a; color: #e2e8f0; border-radius: 6px; padding: 12px; min-height: 96px; max-height: 360px; overflow: auto; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .status { font-size: 13px; color: #475569; }
+    @media (max-width: 820px) {
+      .shell { grid-template-columns: 1fr; }
+      .grid { grid-template-columns: 1fr; }
+      .side { padding: 16px; }
+      .main { padding: 16px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="side">
+      <div class="brand"><img src="/logo.png" alt="">nautylus</div>
+      <div class="meta">
+        <div>Local property graph database</div>
+        <div id="stats">Loading...</div>
+        <button onclick="refreshAll()">Refresh</button>
+        <button class="secondary" onclick="sample()">Create Sample</button>
+      </div>
+    </aside>
+    <main class="main">
+      <div class="bar">
+        <h1>Workbench</h1>
+        <span class="status" id="message">Ready</span>
+      </div>
+      <section class="panel graph-panel">
+        <svg id="graph" role="img" aria-label="Graph visualization"></svg>
+      </section>
+      <section class="grid">
+        <div class="panel">
+          <h2>Query</h2>
+          <textarea id="query">MATCH (n) RETURN n LIMIT 20</textarea>
+          <div class="row">
+            <button onclick="runQuery()">Run</button>
+            <button class="secondary" onclick="explain()">Explain</button>
+          </div>
+        </div>
+        <div class="panel">
+          <h2>Import Triples</h2>
+          <textarea id="triples">alice	KNOWS	bob
+bob	KNOWS	carol</textarea>
+          <button onclick="importTriples()">Import TSV</button>
+        </div>
+      </section>
+      <section class="grid">
+        <div class="panel">
+          <h2>Schema</h2>
+          <div class="cols"><input id="label" value="Person"><input id="key" value="name"></div>
+          <div class="row">
+            <button onclick="constraint('require')">Require</button>
+            <button onclick="constraint('unique')">Unique</button>
+            <button onclick="indexCreate()">Index</button>
+          </div>
+          <h2>Colors</h2>
+          <div class="cols"><input id="colorLabel" value="Person"><input id="colorValue" type="color" value="#0f766e"></div>
+          <div class="row">
+            <button onclick="setNodeColor()">Apply</button>
+            <button class="secondary" onclick="clearNodeColor()">Reset</button>
+          </div>
+          <pre id="schema"></pre>
+        </div>
+        <div class="panel">
+          <h2>Output</h2>
+          <pre id="output"></pre>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/d3.js"></script>
+  <script>
+    let fullGraph = { nodes: [], links: [] };
+    let visibleIds = new Set();
+    let nodePositions = new Map();
+    let nodeColors = new Map(JSON.parse(localStorage.getItem('nautylus-node-colors') || '[]'));
+    let graphSimulation = null;
+    let expansionCount = 0;
+    let graphView = { x: 0, y: 0, k: 1 };
+
+    async function req(path, body) {
+      const opt = body === undefined ? {} : { method: 'POST', body };
+      const response = await fetch(path, opt);
+      const text = await response.text();
+      if (!response.ok) throw new Error(text || response.statusText);
+      return text;
+    }
+    function show(text) {
+      document.getElementById('output').textContent = text;
+      document.getElementById('message').textContent = 'Updated';
+    }
+    async function refreshAll() {
+      try {
+        document.getElementById('stats').textContent = await req('/api/stats');
+        document.getElementById('schema').textContent = (await req('/api/constraints')) + (await req('/api/indexes'));
+        await drawGraph();
+      } catch (error) {
+        document.getElementById('message').textContent = error.message;
+      }
+    }
+    function color(label) {
+      if (nodeColors.has(label)) return nodeColors.get(label);
+      const primary = label.split(',')[0];
+      if (nodeColors.has(primary)) return nodeColors.get(primary);
+      const palette = ['#65a30d', '#0f766e', '#2563eb', '#9333ea', '#db2777', '#ca8a04', '#475569'];
+      let h = 0;
+      for (const ch of label) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+      return palette[h % palette.length];
+    }
+
+    function saveNodeColors() {
+      localStorage.setItem('nautylus-node-colors', JSON.stringify([...nodeColors]));
+    }
+
+    function linkId(value) {
+      return typeof value === 'object' ? value.id : value;
+    }
+
+    function expandNode(node) {
+      const before = visibleIds.size;
+      const origin = nodePositions.get(node.id) || node;
+      const seedNeighbor = id => {
+        if (nodePositions.has(id)) return;
+        const angle = expansionCount * 2.399963229728653;
+        const radius = 96 + (expansionCount % 3) * 22;
+        expansionCount++;
+        nodePositions.set(id, {
+          x: (origin.x || 0) + Math.cos(angle) * radius,
+          y: (origin.y || 0) + Math.sin(angle) * radius
+        });
+      };
+      for (const link of fullGraph.links) {
+        const source = linkId(link.source);
+        const target = linkId(link.target);
+        if (source === node.id) {
+          visibleIds.add(target);
+          seedNeighbor(target);
+        }
+        if (target === node.id) {
+          visibleIds.add(source);
+          seedNeighbor(source);
+        }
+      }
+      document.getElementById('message').textContent = visibleIds.size > before ? 'Expanded' : 'No more neighbors';
+      renderGraph();
+    }
+
+    function seedVisibleIds() {
+      const adjacency = new Map(fullGraph.nodes.map(node => [node.id, []]));
+      for (const link of fullGraph.links) {
+        const source = linkId(link.source);
+        const target = linkId(link.target);
+        if (adjacency.has(source)) adjacency.get(source).push(target);
+        if (adjacency.has(target)) adjacency.get(target).push(source);
+      }
+      const seen = new Set();
+      for (const node of fullGraph.nodes) {
+        if (seen.has(node.id)) continue;
+        const queue = [node.id];
+        const component = [];
+        let hasVisibleNode = false;
+        seen.add(node.id);
+        while (queue.length) {
+          const current = queue.shift();
+          component.push(current);
+          if (visibleIds.has(current)) hasVisibleNode = true;
+          for (const next of adjacency.get(current) || []) {
+            if (!seen.has(next)) {
+              seen.add(next);
+              queue.push(next);
+            }
+          }
+        }
+        if (!hasVisibleNode && component.length) {
+          visibleIds.add(component[0]);
+          for (const next of adjacency.get(component[0]) || []) visibleIds.add(next);
+        }
+      }
+    }
+
+    async function drawGraph(seed = true, render = true) {
+      fullGraph = JSON.parse(await req('/api/graph'));
+      const validIds = new Set(fullGraph.nodes.map(d => d.id));
+      visibleIds = new Set([...visibleIds].filter(id => validIds.has(id)));
+      nodePositions = new Map([...nodePositions].filter(([id]) => validIds.has(id)));
+      if (seed) seedVisibleIds();
+      if (render) renderGraph();
+    }
+
+    function renderGraph() {
+      const svg = d3.select('#graph');
+      const node = svg.node();
+      const width = node.clientWidth || 800;
+      const height = node.clientHeight || 430;
+      if (graphSimulation) graphSimulation.stop();
+      svg.selectAll('*').remove();
+      svg.attr('viewBox', [0, 0, width, height]);
+      node.oncontextmenu = event => event.preventDefault();
+      const defs = svg.append('defs');
+      defs.append('marker')
+        .attr('id', 'arrow').attr('viewBox', '0 -5 10 10').attr('refX', 30).attr('refY', 0)
+        .attr('markerWidth', 7).attr('markerHeight', 7).attr('orient', 'auto')
+        .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#94a3b8');
+      const nodes = fullGraph.nodes.filter(d => visibleIds.has(d.id)).map(d => {
+        const position = nodePositions.get(d.id);
+        return position ? { ...d, x: position.x, y: position.y } : { ...d };
+      });
+      const links = fullGraph.links
+        .filter(d => visibleIds.has(linkId(d.source)) && visibleIds.has(linkId(d.target)))
+        .map(d => ({...d, source: linkId(d.source), target: linkId(d.target)}));
+      if (!nodes.length) {
+        svg.append('text').attr('x', width / 2).attr('y', height / 2).attr('text-anchor', 'middle').attr('fill', '#64748b').text('No graph data');
+        return;
+      }
+      const viewport = svg.append('g').attr('class', 'viewport').attr('transform', `translate(${graphView.x},${graphView.y}) scale(${graphView.k})`);
+      svg.call(d3.drag()
+        .filter(event => event.button === 2)
+        .on('start', () => { document.getElementById('message').textContent = 'Panning'; })
+        .on('drag', event => {
+          graphView.x += event.dx;
+          graphView.y += event.dy;
+          viewport.attr('transform', `translate(${graphView.x},${graphView.y}) scale(${graphView.k})`);
+        })
+        .on('end', () => { document.getElementById('message').textContent = 'Ready'; }));
+      svg.on('wheel', event => {
+        event.preventDefault();
+        const scale = event.deltaY < 0 ? 1.12 : 0.89;
+        const next = Math.max(0.25, Math.min(3, graphView.k * scale));
+        const rect = node.getBoundingClientRect();
+        const px = event.clientX - rect.left;
+        const py = event.clientY - rect.top;
+        graphView.x = px - (px - graphView.x) * (next / graphView.k);
+        graphView.y = py - (py - graphView.y) * (next / graphView.k);
+        graphView.k = next;
+        viewport.attr('transform', `translate(${graphView.x},${graphView.y}) scale(${graphView.k})`);
+      }, { passive: false });
+      const simulation = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(links).id(d => d.id).distance(130))
+        .force('charge', d3.forceManyBody().strength(-520))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .force('collide', d3.forceCollide(46));
+      graphSimulation = simulation;
+      const link = viewport.append('g').attr('stroke', '#94a3b8').attr('stroke-width', 1.7)
+        .selectAll('line').data(links).join('line').attr('marker-end', 'url(#arrow)');
+      const linkText = viewport.append('g').selectAll('text').data(links).join('text')
+        .attr('font-size', 11).attr('fill', '#475569').attr('paint-order', 'stroke').attr('stroke', '#fbfcfe').attr('stroke-width', 4)
+        .text(d => d.type);
+      const group = viewport.append('g').selectAll('g').data(nodes).join('g')
+        .on('dblclick', (event, d) => { event.stopPropagation(); expandNode(d); })
+        .call(d3.drag()
+          .filter(event => event.button === 0)
+          .on('start', (event, d) => { if (!event.active) simulation.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+          .on('drag', (event, d) => { d.fx = (event.x - graphView.x) / graphView.k; d.fy = (event.y - graphView.y) / graphView.k; })
+          .on('end', (event, d) => { if (!event.active) simulation.alphaTarget(0); d.fx = null; d.fy = null; }));
+      group.append('circle').attr('r', 28).attr('fill', d => color(d.label)).attr('stroke', '#ffffff').attr('stroke-width', 3);
+      group.append('text').attr('text-anchor', 'middle').attr('dy', '-.1em').attr('fill', '#ffffff').attr('font-size', 12).attr('font-weight', 700).text(d => d.caption.slice(0, 12));
+      group.append('text').attr('text-anchor', 'middle').attr('dy', '1.25em').attr('fill', '#e2e8f0').attr('font-size', 9).text(d => d.label.split(',')[0].slice(0, 12));
+      group.append('title').text(d => `${d.caption}\n${d.label}\n#${d.id}`);
+      const clampNode = d => {
+        if (!Number.isFinite(d.x)) d.x = width / 2;
+        if (!Number.isFinite(d.y)) d.y = height / 2;
+        if (d.x < 32) { d.x = 32; d.vx = Math.max(0, d.vx || 0); }
+        if (d.x > width - 32) { d.x = width - 32; d.vx = Math.min(0, d.vx || 0); }
+        if (d.y < 32) { d.y = 32; d.vy = Math.max(0, d.vy || 0); }
+        if (d.y > height - 32) { d.y = height - 32; d.vy = Math.min(0, d.vy || 0); }
+      };
+      simulation.on('tick', () => {
+        nodes.forEach(clampNode);
+        link.attr('x1', d => d.source.x).attr('y1', d => d.source.y).attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+        linkText.attr('x', d => (d.source.x + d.target.x) / 2).attr('y', d => (d.source.y + d.target.y) / 2);
+        group.attr('transform', d => {
+          nodePositions.set(d.id, { x: d.x, y: d.y });
+          const x = d.x;
+          const y = d.y;
+          return `translate(${x},${y})`;
+        });
+      });
+    }
+    async function runQuery() {
+      try {
+        const query = document.getElementById('query').value;
+        const output = await req('/api/query', query);
+        const ids = (await req('/api/query-nodes', query)).split(/\s+/).filter(Boolean);
+        show(output);
+        await drawGraph(false, false);
+        const validIds = new Set(fullGraph.nodes.map(d => d.id));
+        visibleIds = new Set(ids.filter(id => validIds.has(id)));
+        renderGraph();
+      }
+      catch (error) { show(error.message); }
+    }
+    async function explain() {
+      try { show(await req('/api/explain', document.getElementById('query').value)); }
+      catch (error) { show(error.message); }
+    }
+    async function importTriples() {
+      try { show(await req('/api/import-triples', document.getElementById('triples').value)); visibleIds.clear(); nodePositions.clear(); expansionCount = 0; await refreshAll(); }
+      catch (error) { show(error.message); }
+    }
+    async function sample() {
+      try { show(await req('/api/sample', '')); visibleIds.clear(); nodePositions.clear(); expansionCount = 0; await refreshAll(); }
+      catch (error) { show(error.message); }
+    }
+    function pair() {
+      return document.getElementById('label').value + '\t' + document.getElementById('key').value;
+    }
+    async function constraint(kind) {
+      try { show(await req('/api/constraint-' + kind, pair())); await refreshAll(); }
+      catch (error) { show(error.message); }
+    }
+    async function indexCreate() {
+      try { show(await req('/api/index-create', pair())); await refreshAll(); }
+      catch (error) { show(error.message); }
+    }
+    function setNodeColor() {
+      const label = document.getElementById('colorLabel').value.trim();
+      const value = document.getElementById('colorValue').value;
+      if (!label) return;
+      nodeColors.set(label, value);
+      saveNodeColors();
+      renderGraph();
+    }
+    function clearNodeColor() {
+      const label = document.getElementById('colorLabel').value.trim();
+      if (!label) return;
+      nodeColors.delete(label);
+      saveNodeColors();
+      renderGraph();
+    }
+    refreshAll();
+  </script>
+</body>
+</html>

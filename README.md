@@ -4,75 +4,454 @@
   <img src="resources/logo/logo.png" alt="nautylus logo" />
 </p>
 
-Nautylus is a **single-node, embedded** graph + vector engine for
-recommendation and ideation, with deterministic scoring and
-explainability as first-class features.
+**nautylus** is a compact embedded property-graph database written in portable C99. It stores labeled nodes, typed directed relationships, and typed properties in a portable single-file snapshot.
 
-## Quick start
+`nautylus` is intended for small embedded applications, command-line tools, tests, and data-processing workflows that need a persistent property graph without running a database server or adding an external dependency.
 
-Build the static library and demo CLI:
+**Status:** Usable alpha. The implemented subset is tested and usable, but multi-process writer coordination and the web interface are not yet implemented. A narrow MiniCypher query subset, transactions, exact-match indexes, and persisted required/unique property constraints exist as explicit C APIs. See [STATUS.md](STATUS.md) for detailed implementation evidence.
+
+`nautylus` is inspired by Neo4j's property-graph model, but it does not implement Neo4j storage formats, Bolt, or full Cypher.
+
+## Why nautylus
+
+Choose `nautylus` when you want:
+
+* a small C99 graph library that is easy to inspect;
+* a CLI that can import, validate, and export graph data;
+* deterministic, text-based interchange formats for tests and data pipelines;
+* a single-file portable snapshot with explicit validation;
+* no database server, background process, or runtime dependency.
+
+Current scale model:
+
+* The whole graph is loaded into memory by `ng_open()`.
+* Mutations are in-memory until `ng_save()` succeeds.
+* `ng_close()` does not save automatically.
+* The regression suite currently covers small graphs, deterministic ordering, rollback behavior, typed values, and CLI workflows. No large-graph performance envelope is claimed yet.
+* A small local performance smoke baseline is available with `make perf`; see [docs/limits.md](docs/limits.md).
+* A `ng_graph` is not documented as thread-safe. Use one graph from one thread at a time unless you add external synchronization.
+* There is no multi-process writer coordination.
+
+## Build
 
 ```sh
 make
 ```
 
-Run a demo query (in-process, in-memory):
+This builds `build/nautylus.o` for embedding and `build/nautylus` for command-line use.
+
+Run tests:
 
 ```sh
-./nautylus demo
-./nautylus query --node alba --k 3
+make test
 ```
 
-Launch the local demo UI:
+Build examples:
 
 ```sh
-./nautylus serve --port 6180
+make examples
 ```
 
-Then open `http://127.0.0.1:6180` in your browser. The UI bundles D3.js
-locally from `resources/d3/d3.v7.min.js`.
-
-## Load your own data
-
-CSV nodes (name + vector):
-
-```csv
-alba,0.1,0.2,0.3
-boreal,0.2,0.1,0.4
-```
-
-CSV edges (from,to,weight):
-
-```csv
-alba,boreal,1.0
-```
-
-Build a local store and query it:
+Run the local performance smoke baseline:
 
 ```sh
-./nautylus load --nodes nodes.csv --edges edges.csv --dim 3 --out demo.nty
-./nautylus query --db demo.nty --node alba --k 3
-./nautylus serve --db demo.nty
+make perf
 ```
 
-Store files are a simple binary snapshot for the demo flow; the format
-is not stable yet.
+The default build uses:
 
-JSON input (nodes + edges) also works:
+```sh
+cc -std=c99 -Wall -Wextra -Wpedantic -O2
+```
 
-```json
-{
-  "nodes": [
-    {"name": "alba", "vector": [0.1, 0.2, 0.3]}
-  ],
-  "edges": [
-    {"from": "alba", "to": "alba", "weight": 1.0}
-  ]
+## Five-Minute Quick Start
+
+This workflow is covered by the regression suite.
+
+```sh
+make
+
+./build/nautylus create graph.ng
+
+printf 'alice\tKNOWS\tbob\n' > triples.tsv
+./build/nautylus store graph.ng triples.tsv
+
+./build/nautylus search graph.ng 'MATCH (n) RETURN n LIMIT 10'
+./build/nautylus analyze graph.ng
+./build/nautylus export graph.ng -
+```
+
+Expected `analyze` output:
+
+```text
+status: ok
+nodes: 2
+relationships: 1
+symbols: 2
+```
+
+Expected export output:
+
+```text
+alice	KNOWS	bob
+```
+
+Validate a database:
+
+```sh
+./build/nautylus validate graph.ng
+```
+
+Expected output:
+
+```text
+ok
+```
+
+## CLI Reference
+
+```text
+nautylus create FILE
+nautylus open FILE
+nautylus help
+nautylus version
+nautylus validate FILE
+nautylus stats FILE
+nautylus analyze FILE
+nautylus analyse FILE
+nautylus store DB TRIPLES
+nautylus import DB TRIPLES
+nautylus store-csv DB TRIPLES_CSV
+nautylus import-csv DB TRIPLES_CSV
+nautylus export DB TRIPLES
+nautylus store-ng DB NODES RELATIONSHIPS
+nautylus import-ng DB NODES RELATIONSHIPS
+nautylus export-ng DB NODES RELATIONSHIPS
+nautylus constraint-require DB LABEL KEY
+nautylus constraint-unique DB LABEL KEY
+nautylus constraint-drop-require DB LABEL KEY
+nautylus constraint-drop-unique DB LABEL KEY
+nautylus constraints DB
+nautylus index-create DB LABEL KEY
+nautylus index-drop DB LABEL KEY
+nautylus indexes DB
+nautylus bench FILE NODE_COUNT
+nautylus serve DB PORT
+nautylus search DB QUERY
+nautylus query DB QUERY
+nautylus explain QUERY
+```
+
+Notes:
+
+* `nautylus create` creates a native database snapshot.
+* `nautylus open` opens and validates a database.
+* `nautylus store` imports triple TSV files and saves the database.
+* `nautylus import` imports triple TSV files.
+* `nautylus store-csv` imports triple CSV files and saves the database.
+* `nautylus import-csv` imports triple CSV files.
+* `nautylus store-ng` imports explicit property-graph node and relationship TSV files and saves the database.
+* `nautylus help` and `nautylus --help` print command usage.
+* `nautylus version` and `nautylus --version` print the current alpha version string.
+* `nautylus export DB -` writes triples to standard output.
+* `nautylus import-ng` imports explicit property-graph node and relationship TSV files.
+* `nautylus export-ng` writes explicit property-graph node and relationship TSV files.
+* `nautylus constraint-require` stores a required node-property constraint for a label and key.
+* `nautylus constraint-unique` stores a unique node-property constraint for a label and key.
+* `nautylus constraints` lists stored node-property constraints.
+* `nautylus index-create` stores exact-match node-index metadata for a label and key.
+* `nautylus index-drop` removes exact-match node-index metadata for a label and key.
+* `nautylus indexes` lists stored node-index metadata.
+* `nautylus bench` creates a deterministic benchmark graph, saves/reopens it, validates it, builds an exact-match node index, and prints local timing.
+* `nautylus serve` starts a local browser workbench for querying, importing triples, creating sample data, and managing simple schema metadata.
+* `nautylus search` runs the current MiniCypher subset and prints matching node IDs.
+* `nautylus query` runs the current MiniCypher subset and prints matching node IDs.
+* `nautylus analyze` and `nautylus analyse` validate the database and print graph counts.
+* `nautylus explain` prints the simple selected query plan.
+* Exit status is `0` on success and non-zero on failure.
+* Malformed property-graph imports report line and column diagnostics where available.
+
+Example malformed property-graph input:
+
+```text
+node		Person	name=s:416c696365
+```
+
+Typical error shape:
+
+```text
+parse error at line 1 column 1
+parse error
+```
+
+## C API Example
+
+Link against `build/nautylus.o` and include `src/nautylus.h`:
+
+```sh
+cc -std=c99 -Wall -Wextra -Wpedantic -O2 -Isrc my_app.c build/nautylus.o -o my_app
+```
+
+Minimal checked example:
+
+```c
+#include "nautylus.h"
+#include <stdio.h>
+#include <string.h>
+
+#define NG_CHECK(expr) do { \
+    status = (expr); \
+    if (status != NG_OK) { \
+        fprintf(stderr, "%s\n", ng_status_name(status)); \
+        goto fail; \
+    } \
+} while (0)
+
+int main(void) {
+    ng_graph *g = 0;
+    ng_status status = NG_OK;
+    ng_symbol_id person = 0, knows = 0, name = 0;
+    ng_node_id alice = 0, bob = 0;
+    ng_relationship_id rel = 0;
+    ng_value value;
+
+    NG_CHECK(ng_create(&g, "example.ng"));
+    NG_CHECK(ng_symbol(g, "Person", &person));
+    NG_CHECK(ng_symbol(g, "KNOWS", &knows));
+    NG_CHECK(ng_symbol(g, "name", &name));
+
+    NG_CHECK(ng_node_create(g, &person, 1, &alice));
+    NG_CHECK(ng_node_create(g, &person, 1, &bob));
+    NG_CHECK(ng_relationship_create(g, alice, knows, bob, &rel));
+
+    memset(&value, 0, sizeof(value));
+    value.type = NG_VALUE_STRING;
+    value.length = 5;
+    value.as.string = "Alice";
+    NG_CHECK(ng_node_set(g, alice, name, &value));
+
+    NG_CHECK(ng_save(g));
+    ng_close(g);
+    return 0;
+
+fail:
+    ng_close(g);
+    return 1;
 }
 ```
 
-Load JSON directly without a store:
+More API details are in [docs/api.md](docs/api.md).
+
+## MiniCypher Subset
+
+The current query parser intentionally supports node matches and bounded directed relationship matches:
+
+```text
+MATCH (n) RETURN n
+MATCH (n) RETURN n.id
+MATCH (n:Label) RETURN n.key
+MATCH (n:Label) RETURN n
+MATCH (n:Label) WHERE n.key = "value" RETURN n
+MATCH (n:Label) WHERE id(n) = 1 RETURN n
+MATCH (n:Label) WHERE n.id = 1 RETURN n.key
+MATCH (n) RETURN n LIMIT 10
+MATCH (n)-[:TYPE]->(m) RETURN m
+MATCH (n)-[:TYPE*1..3]->(m) RETURN m
+MATCH (n)-[:TYPE]->(m) RETURN n.key, m.key
+MATCH (n:Label)-[:TYPE]->(m:Label) WHERE m.key = "value" RETURN n LIMIT 10
+```
+
+Supported predicate literals are strings, integers, booleans, and `null`. Query results are deterministic in internal scan order. The CLI can return node IDs with `RETURN n`/`RETURN m`, explicit IDs with `RETURN n.id`, node-property projections with `RETURN n.key` or `RETURN m.key`, and tab-separated multi-column projections. Relationship patterns are directed and support exact or bounded hop counts from 1 to 64, such as `*2` or `*1..3`. Mutation queries, aggregation, and full Cypher semantics are not implemented yet.
+
+Example:
 
 ```sh
-./nautylus query --json data.json --node alba --k 3
+./build/nautylus query graph.ng 'MATCH (n) RETURN n LIMIT 10'
+./build/nautylus explain 'MATCH (n:Person) WHERE n.name = "Alice" RETURN n'
+./build/nautylus query graph.ng 'MATCH (n)-[:KNOWS]->(m) RETURN m'
+./build/nautylus query graph.ng 'MATCH (n)-[:KNOWS*1..3]->(m) RETURN m'
+./build/nautylus query graph.ng 'MATCH (n:Person) WHERE id(n) = 1 RETURN n.name'
 ```
+
+## Web Workbench
+
+Start the local web interface:
+
+```sh
+./build/nautylus serve graph.ng 6180
+```
+
+Open `http://127.0.0.1:6180`. The workbench serves static assets from `resources/web` and `resources/logo`, and operates on the database path passed to `serve`.
+
+The current workbench supports stats, MiniCypher query/explain, triple TSV import, sample graph creation, required/unique node-property constraints, and exact-match index metadata.
+
+## File Formats
+
+### Triple TSV
+
+Triple import uses three tab-separated fields per line:
+
+```text
+source<TAB>relationship_type<TAB>target
+```
+
+Example:
+
+```text
+alice	KNOWS	bob
+bob	WORKS_AT	acme
+```
+
+Duplicate suppression:
+
+* duplicates are identified by `(source node, relationship type, target node)`;
+* direction matters;
+* existing relationships already in the database count;
+* public C import calls can preserve parallel duplicates with `preserve_parallel != 0`;
+* the current CLI uses duplicate suppression.
+
+### Triple CSV
+
+CSV triple import uses three comma-separated fields per line:
+
+```text
+source,relationship_type,target
+```
+
+Fields may be quoted with double quotes. Inside quoted fields, doubled quotes decode to one literal quote:
+
+```csv
+"ali,ce",KNOWS,"bo""b"
+```
+
+CSV import follows the same duplicate-suppression and rollback rules as TSV import. Embedded newlines inside quoted fields are not supported.
+
+### Property Graph TSV
+
+Node records:
+
+```text
+node<TAB>external_id<TAB>comma,separated,labels<TAB>key=value;key=value
+```
+
+Relationship records:
+
+```text
+relationship<TAB>external_id<TAB>source_external_id<TAB>type<TAB>target_external_id<TAB>key=value;key=value
+```
+
+Duplicate behavior:
+
+* repeated node external IDs update the same logical node;
+* labels are deduplicated per node;
+* relationship duplicates are suppressed by `(source, type, target)` unless `preserve_parallel != 0` is used from C;
+* relationship external IDs are parsed for format compatibility but are not currently stored as a user-visible property.
+
+Property values use a compact typed encoding:
+
+| Type | Encoding | Example |
+| --- | --- | --- |
+| null | `n` | `deleted=n` |
+| bool | `b:0` or `b:1` | `active=b:1` |
+| int64 | `i:<decimal>` | `age=i:42` |
+| double | `d:<16 hex bits>` | `score=d:4004000000000000` |
+| string | `s:<hex bytes>` | `name=s:416c696365` |
+| bytes | `x:<hex bytes>` | `blob=x:0001ff` |
+
+Text and encoding rules:
+
+* CRLF and LF line endings are accepted.
+* Blank lines and comments are not accepted.
+* Empty labels and empty property keys are invalid.
+* Labels, relationship types, and property keys must not contain tab, newline, carriage return, comma, semicolon, or equals.
+* Triple entity names and relationship names must not contain tabs or newlines.
+* Hex input accepts uppercase or lowercase digits.
+* String values are hex-encoded bytes; the library stores a length, so embedded NUL bytes can round-trip through property-graph TSV.
+* UTF-8 is not currently validated.
+* Double values are encoded as exact 64-bit payloads, preserving signed zero and NaN bit patterns.
+
+Null semantics:
+
+* An absent property and a property present with `NG_VALUE_NULL` are different states.
+* `key=n` imports a present null property.
+* Setting a property to null does not delete it.
+* Delete properties through `ng_node_unset()` and `ng_relationship_unset()`.
+
+`__nautylus_external_id` is reserved for the property-graph importer. Export may include it for databases created from imports; reimport treats it as structural metadata instead of a user property.
+
+## Persistence and Safety
+
+The native database file is a single portable snapshot. Details are in [docs/snapshot-format.md](docs/snapshot-format.md).
+
+Save sequence:
+
+1. Validate the in-memory graph.
+2. Encode the graph into a portable little-endian payload.
+3. Write a versioned header and checksum to `FILE.tmp`.
+4. Close the temporary file.
+5. Rename the temporary file over the target path.
+
+If validation, encoding, writing, or closing fails before the rename, the previous database file is left intact. Rename atomicity and crash durability depend on the operating system and filesystem; the current implementation does not fsync the containing directory.
+
+Property-graph export writes two files. When replacing existing output files it stages temporary files and uses `.nautylusbak` backups to avoid knowingly leaving an old/new mismatch after ordinary rename errors. Existing `.nautylusbak` files block export with `NG_EXISTS`. Full crash recovery for every possible two-file rename interruption is not claimed yet.
+
+## Determinism
+
+Guaranteed by the current implementation and tests:
+
+* Repeated property-graph exports of the same graph are byte-identical.
+* Property-graph export order is sorted by node ID, relationship ID, label ID, and property key ID.
+* Typed values preserve exact stored values, including double bit patterns.
+* IDs are stable after save/reopen.
+
+Not currently claimed:
+
+* byte-identical native snapshots for independently built equivalent graphs;
+* insertion-order-independent symbol IDs;
+* deterministic output after changing symbol allocation order.
+
+## Limitations
+
+Not implemented yet:
+
+* durable transaction journal;
+* HTTP/web interface;
+* multi-process writer coordination;
+* mutation queries and aggregation;
+* complete two-file export crash recovery;
+* fuzzing and profiling harnesses.
+
+## Development Status
+
+Capability summary:
+
+| Area | Implemented now | Remaining |
+| --- | --- | --- |
+| Core graph | CRUD, labels, typed properties, property deletion, directed relationships, validation | Incremental adjacency maintenance |
+| Persistence | Single-file snapshots, checksum, strict load checks, atomic replacement where supported | Generations, per-section checksums, directory fsync, migrations |
+| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, node and bounded relationship MiniCypher, ID predicates, property and multi-column projection | Aggregation, mutation queries |
+| Import/export | Triple TSV/CSV, property-graph TSV, CLI workflows, rollback on import failure | Stronger two-file crash recovery, richer CLI flags |
+| Release quality | Strict C99 tests, ASan/UBSan run with LeakSanitizer disabled in this environment, documented tested limits, small local performance baseline, local web workbench smoke coverage | CI, fuzzing, profiling |
+
+Detailed evidence is in [STATUS.md](STATUS.md).
+
+## Project Documents
+
+* [STATUS.md](STATUS.md): implementation evidence and roadmap status.
+* [docs/api.md](docs/api.md): C API semantics and ownership rules.
+* [docs/snapshot-format.md](docs/snapshot-format.md): native snapshot format and compatibility policy.
+* [docs/limits.md](docs/limits.md): tested limits and local performance baseline.
+* [src/nautylus.h](src/nautylus.h): public C API.
+* [src/nautylus.c](src/nautylus.c): core library implementation.
+* [src/nautylus.c99main.c](src/nautylus.c99main.c): CLI entry point.
+* [resources/web/index.html](resources/web/index.html): local web workbench.
+* [tests/test_nautylus.c](tests/test_nautylus.c): regression suite.
+* [examples/basic.c](examples/basic.c): minimal embeddable C API example.
+* `agent.md`: full project specification and roadmap.
+
+Planned project files:
+
+* `LICENSE`
+* `CONTRIBUTING.md`
+* `CHANGELOG.md`
+* `SECURITY.md`
