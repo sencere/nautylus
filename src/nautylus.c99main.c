@@ -416,6 +416,63 @@ static void graph_caption(char *out, size_t cap, const char *id, char *props) {
     snprintf(out, cap, "%s", id);
 }
 
+static int json_put_encoded_value(FILE *out, const char *encoded) {
+    size_t i, n;
+    if (!encoded) return fputs("null", out) >= 0;
+    if (encoded[0] == 'n' && encoded[1] == 0) return fputs("null", out) >= 0;
+    if (encoded[0] == 'b' && encoded[1] == ':' && (encoded[2] == '0' || encoded[2] == '1') && encoded[3] == 0)
+        return fputs(encoded[2] == '1' ? "true" : "false", out) >= 0;
+    if (encoded[0] == 'i' && encoded[1] == ':') return fputs(encoded + 2, out) >= 0;
+    if (encoded[0] == 'd' && encoded[1] == ':' && strlen(encoded + 2) == 16) {
+        uint64_t bits = 0;
+        double value;
+        for (i = 0; i < 16; i++) {
+            int digit = hex_value((unsigned char)encoded[2 + i]);
+            if (digit < 0) return 0;
+            bits = (bits << 4) | (unsigned)digit;
+        }
+        memcpy(&value, &bits, sizeof(value));
+        return fprintf(out, "%.17g", value) >= 0;
+    }
+    if (encoded[0] == 's' && encoded[1] == ':') {
+        n = strlen(encoded + 2) / 2;
+        {
+            char *text = (char *)malloc(n + 1);
+            if (!text) return 0;
+            for (i = 0; i < n; i++) {
+                int high = hex_value((unsigned char)encoded[2 + i * 2]);
+                int low = hex_value((unsigned char)encoded[3 + i * 2]);
+                if (high < 0 || low < 0) { free(text); return 0; }
+                text[i] = (char)((high << 4) | low);
+            }
+            text[n] = 0;
+            i = json_put_escaped(out, text);
+            free(text);
+            return (int)i;
+        }
+    }
+    return json_put_escaped(out, encoded);
+}
+
+static int json_put_properties(FILE *out, char *props) {
+    char *cursor = props;
+    int first = 1;
+    if (fputc('{', out) == EOF) return 0;
+    while (cursor && *cursor) {
+        char *semi = strchr(cursor, ';'), *eq;
+        if (semi) *semi = 0;
+        eq = strchr(cursor, '=');
+        if (eq) {
+            *eq = 0;
+            if (!first && fputc(',', out) == EOF) return 0;
+            if (!json_put_escaped(out, cursor) || fputc(':', out) == EOF || !json_put_encoded_value(out, eq + 1)) return 0;
+            first = 0;
+        }
+        cursor = semi ? semi + 1 : NULL;
+    }
+    return fputc('}', out) != EOF;
+}
+
 static char *next_tab(char **cursor) {
     char *start = *cursor, *tab;
     if (!start) return 0;
@@ -438,7 +495,7 @@ static char *graph_json_from_exports(const char *nodes_path, const char *rels_pa
     if (!out) { fclose(nodes); fclose(rels); *status = NG_IO_ERROR; return 0; }
     if (fputs("{\"nodes\":[", out) < 0) goto io;
     while (fgets(line, sizeof(line), nodes)) {
-        char *kind, *id, *labels, *props, *p = line;
+        char *kind, *id, *labels, *props, *caption_props, *p = line;
         size_t len = strlen(line);
         while (len && (line[len - 1] == '\n' || line[len - 1] == '\r')) line[--len] = 0;
         kind = next_tab(&p);
@@ -446,11 +503,15 @@ static char *graph_json_from_exports(const char *nodes_path, const char *rels_pa
         labels = next_tab(&p);
         props = p ? p : "";
         if (!kind || strcmp(kind, "node") || !id || !labels) continue;
-        graph_caption(caption, sizeof(caption), id, props);
+        caption_props = (char *)malloc(strlen(props) + 1);
+        if (!caption_props) goto oom;
+        strcpy(caption_props, props);
+        graph_caption(caption, sizeof(caption), id, caption_props);
+        free(caption_props);
         if (!first && fputc(',', out) == EOF) goto io;
         first = 0;
         if (fputs("{\"id\":", out) < 0 || !json_put_escaped(out, id) || fputs(",\"label\":", out) < 0) goto io;
-        if (!json_put_escaped(out, *labels ? labels : "Node") || fputs(",\"caption\":", out) < 0 || !json_put_escaped(out, caption) || fputc('}', out) == EOF) goto io;
+        if (!json_put_escaped(out, *labels ? labels : "Node") || fputs(",\"caption\":", out) < 0 || !json_put_escaped(out, caption) || fputs(",\"properties\":", out) < 0 || !json_put_properties(out, props) || fputc('}', out) == EOF) goto io;
     }
     if (fputs("],\"links\":[", out) < 0) goto io;
     first = 1;
@@ -485,6 +546,8 @@ io:
     fclose(nodes); fclose(rels); fclose(out);
     *status = NG_IO_ERROR;
     return 0;
+oom:
+    fclose(nodes); fclose(rels); fclose(out); *status = NG_OOM; return 0;
 }
 
 static char *capture_graph_json(const char *db_path, ng_status *status) {

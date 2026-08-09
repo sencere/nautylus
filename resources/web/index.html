@@ -580,7 +580,7 @@
           return {
             id: d.id,
             labels: label.split(',').filter(Boolean),
-            properties: { id: d.id, caption: d.caption || d.id, label },
+            properties: { id: d.id, caption: d.caption || d.id, label, ...(d.properties || {}) },
             x: position?.x,
             y: position?.y,
             _index: index
