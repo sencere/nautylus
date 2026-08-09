@@ -31,6 +31,7 @@ typedef struct { ng_node_id node; double score; } ng_node_score;
 typedef struct { ng_node_id node; uint64_t value; } ng_node_metric;
 typedef struct { ng_node_id node; uint64_t component; } ng_node_component;
 typedef struct { ng_node_id source, target; double score; } ng_link_score;
+typedef struct { ng_direction direction; ng_symbol_id type; uint32_t max_steps; uint64_t seed; } ng_random_walk_options;
 
 ng_status ng_open(ng_graph **out, const char *path);
 ng_status ng_create(ng_graph **out, const char *path);
@@ -73,6 +74,7 @@ ng_status ng_common_neighbors(const ng_graph *g, ng_node_id a, ng_node_id b, ng_
 ng_status ng_preferential_attachment(const ng_graph *g, ng_node_id a, ng_node_id b, ng_symbol_id type, uint64_t *out);
 ng_status ng_total_neighbors(const ng_graph *g, ng_node_id a, ng_node_id b, ng_symbol_id type, uint64_t *out);
 ng_status ng_topological_sort(const ng_graph *g, ng_symbol_id type, ng_node_id *out, size_t capacity, size_t *out_count);
+ng_status ng_random_walk(const ng_graph *g, ng_node_id start, const ng_random_walk_options *options, ng_node_id *out, size_t capacity, size_t *out_count);
 ng_status ng_find_nodes(const ng_graph *g, ng_symbol_id label, ng_symbol_id key, const ng_value *value, ng_node_match_visitor visitor, void *context);
 ng_status ng_require_node_property(const ng_graph *g, ng_symbol_id label, ng_symbol_id key, ng_node_id *out_node);
 ng_status ng_unique_node_property(const ng_graph *g, ng_symbol_id label, ng_symbol_id key, ng_node_id *out_first, ng_node_id *out_second);

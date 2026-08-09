@@ -252,6 +252,10 @@ size_t count = 0;
 
 ng_pagerank(g, knows, 0.85, 25, scores, 128, &count);
 ng_degree_centrality(g, NG_DIRECTION_EITHER, knows, scores, 128, &count);
+
+ng_random_walk_options walk = { NG_DIRECTION_OUTGOING, knows, 10, 42 };
+ng_node_id path[11];
+ng_random_walk(g, start, &walk, path, 11, &count);
 ```
 
 Implemented algorithms:
@@ -264,6 +268,7 @@ Implemented algorithms:
 * local clustering coefficient;
 * link prediction basics: common neighbors, preferential attachment, total neighbors;
 * topological sort with `NG_EXISTS` returned for cyclic graphs.
+* seeded random walks with outgoing, incoming, or undirected relationship traversal;
 
 All analytics APIs operate on the current in-memory graph and write results into caller-owned arrays. Pass `type = 0` to include all relationship types, or a relationship symbol ID to filter by type. If the output capacity is too small, the call returns `NG_LIMIT` and reports the required count when an `out_count` pointer is supplied.
 
@@ -289,7 +294,10 @@ MATCH (n:Label)-[:TYPE]->(m:Label) WHERE m.key = "value" RETURN n LIMIT 10
 MATCH (a:Person) WITH a MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name
 MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name
 MATCH (a:Person) RETURN a.city, count(a) AS people ORDER BY people DESC
+MATCH (a:Person) CALL randomWalk(a, 5, 42) YIELD node RETURN node
 ```
+
+`CALL randomWalk(start, steps[, seed]) YIELD node` expands each incoming row into one row per visited node, including the start node. The Cypher adapter currently uses outgoing relationships and all relationship types; the typed C API provides direction and relationship-type filters.
 
 Supported scalar values are strings, integers, doubles, booleans, `null`, and lists produced by `collect(...)`. Predicate support includes `=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `IS NULL`, `IS NOT NULL`, `AND`, `OR`, `NOT`, and parentheses. Relationship reads support `->`, `<-`, and undirected `-[]-` patterns. Exact or bounded hop counts from 1 to 64 are supported in read relationship patterns, such as `*2` or `*1..3`.
 
@@ -513,7 +521,7 @@ Capability summary:
 | Core graph | CRUD, labels, typed properties, property deletion, directed relationships, validation | Incremental adjacency maintenance |
 | Persistence | Single-file snapshots, checksum, strict load checks, atomic replacement where supported | Generations, per-section checksums, directory fsync, migrations |
 | Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `OPTIONAL MATCH`, parameters, aggregation, `ORDER BY`, rollback-protected `CREATE`/`MERGE`/`SET`/`DELETE` | Full Cypher compatibility, richer write forms, path values, subqueries |
-| Analytics | Degree centrality, PageRank, weak/strong components, triangle count, local clustering coefficient, common-neighbor style link prediction, topological sort | Weighted paths, community detection, KNN/similarity, embeddings, max flow, scalable algorithm implementations |
+| Analytics | Degree centrality, PageRank, weak/strong components, triangle count, local clustering coefficient, common-neighbor style link prediction, topological sort, seeded random walks | Weighted paths, community detection, KNN/similarity, embeddings, max flow, scalable algorithm implementations |
 | Import/export | Triple TSV/CSV, property-graph TSV, CLI workflows, rollback on import failure | Stronger two-file crash recovery, richer CLI flags |
 | Release quality | Strict C99 tests, ASan/UBSan run with LeakSanitizer disabled in this environment, documented tested limits, small local performance baseline, local web workbench smoke coverage | CI, fuzzing, profiling |
 

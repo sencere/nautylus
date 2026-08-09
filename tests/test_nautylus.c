@@ -536,5 +536,38 @@ int main(void) {
         remove("with-write.out"); remove("with-write.expected"); remove("with-write-search.out");
         remove("with-existing.out"); remove("with-existing.expected");
     }
+    {
+        ng_graph *rw;
+        ng_symbol_id rtype;
+        ng_node_id a, b, c, path1[8], path2[8];
+        ng_relationship_id rid;
+        ng_random_walk_options opts;
+        size_t n1, n2;
+        FILE *qout;
+        int mutated;
+        assert(ng_create(&rw, "random-walk.ng") == NG_OK);
+        assert(ng_symbol(rw, "R", &rtype) == NG_OK);
+        assert(ng_node_create(rw, 0, 0, &a) == NG_OK);
+        assert(ng_node_create(rw, 0, 0, &b) == NG_OK);
+        assert(ng_node_create(rw, 0, 0, &c) == NG_OK);
+        assert(ng_relationship_create(rw, a, rtype, b, &rid) == NG_OK);
+        assert(ng_relationship_create(rw, b, rtype, c, &rid) == NG_OK);
+        opts.direction = NG_DIRECTION_OUTGOING; opts.type = rtype; opts.max_steps = 4; opts.seed = 7;
+        assert(ng_random_walk(rw, a, &opts, path1, 8, &n1) == NG_OK);
+        assert(n1 == 3 && path1[0] == a && path1[1] == b && path1[2] == c);
+        assert(ng_random_walk(rw, a, &opts, path2, 8, &n2) == NG_OK && n2 == n1);
+        assert(memcmp(path1, path2, n1 * sizeof(*path1)) == 0);
+        opts.direction = NG_DIRECTION_INCOMING;
+        assert(ng_random_walk(rw, c, &opts, path2, 8, &n2) == NG_OK && n2 == 3 && path2[1] == b && path2[2] == a);
+        opts.direction = NG_DIRECTION_EITHER; opts.type = 0; opts.max_steps = 1;
+        assert(ng_random_walk(rw, b, &opts, path2, 8, &n2) == NG_OK && n2 == 2);
+        assert(ng_random_walk(rw, a, &opts, path2, 1, &n2) == NG_LIMIT && n2 == 2);
+        assert(ng_random_walk(rw, 999999, &opts, path2, 8, &n2) == NG_NOT_FOUND);
+        qout = tmpfile(); assert(qout);
+        assert(ng_query_execute(rw, "MATCH (a) CALL randomWalk(a, 2, 7) YIELD node RETURN node", qout, &mutated) == NG_OK);
+        assert(ng_query_execute(rw, "MATCH (a) CALL randomWalk(a, 2) YIELD node RETURN node", qout, &mutated) == NG_OK);
+        assert(ng_query_execute(rw, "MATCH (a) CALL randomWalk(a) YIELD node RETURN node", qout, &mutated) == NG_PARSE_ERROR);
+        fclose(qout); ng_close(rw); remove("random-walk.ng");
+    }
     remove_import_files(); remove("test.ng"); puts("ok"); return 0;
 }
