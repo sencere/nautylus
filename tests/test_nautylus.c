@@ -82,6 +82,23 @@ static int match_count_cb(ng_node_id n, void* ctx) {
 static double absd(double x) {
     return x < 0.0 ? -x : x;
 }
+static ng_status procedure_add(const ng_graph* graph,
+                               const ng_value* arguments,
+                               size_t argument_count,
+                               ng_procedure_result* result,
+                               void* context) {
+    (void)graph;
+    (void)context;
+    if (argument_count != 2 || arguments[0].type != NG_VALUE_INT64 ||
+        arguments[1].type != NG_VALUE_INT64 || !result || result->field_capacity < 1)
+        return NG_PARSE_ERROR;
+    result->fields[0].name = "value";
+    result->fields[0].kind = NG_PROCEDURE_SCALAR;
+    result->fields[0].value.type = NG_VALUE_INT64;
+    result->fields[0].value.as.integer = arguments[0].as.integer + arguments[1].as.integer;
+    result->field_count = 1;
+    return NG_OK;
+}
 static ng_status query_tmp(ng_graph* g, const char* q, int* mutated) {
     FILE* f = tmpfile();
     ng_status s;
@@ -219,6 +236,23 @@ int main(void) {
     ng_close(g);
     assert(ng_open(&r, "test.ng") == NG_OK);
     assert(ng_validate(r) == NG_OK);
+    assert(ng_procedure_register(r, "addValues", procedure_add, NULL) == NG_OK);
+    {
+        FILE* procedure_output = tmpfile();
+        int procedure_mutated = 0;
+        char procedure_text[64] = {0};
+        assert(procedure_output);
+        assert(ng_query_execute(r,
+                                "MATCH (a:Person) CALL addValues(id(a), 2) YIELD value "
+                                "RETURN value",
+                                procedure_output,
+                                &procedure_mutated) == NG_OK);
+        assert(!procedure_mutated && fseek(procedure_output, 0, SEEK_SET) == 0);
+        assert(fread(procedure_text, 1, sizeof(procedure_text) - 1, procedure_output) > 0);
+        assert(!strcmp(procedure_text, "3\n"));
+        fclose(procedure_output);
+    }
+    assert(ng_procedure_unregister(r, "addValues") == NG_OK);
     n = 0;
     assert(ng_node_relationships(r, a, NG_DIRECTION_OUTGOING, w, edge_count, &n) == NG_OK &&
            n == 1);
@@ -2446,9 +2480,9 @@ int main(void) {
         fputs("Alice\tBob\n", ef);
         assert(fclose(ef) == 0);
         assert(same_file("bool-rel-is-null.out", "bool-rel-is-null.expected"));
-        assert(system(NAUTYLUS_CLI " query bool.ng 'MATCH (n:Person)-[r:KNOWS {since: "
-                                   "2025}]->(m:Person) RETURN n.name' > bool-relprop-empty.out") ==
-               0);
+        assert(system(NAUTYLUS_CLI
+                      " query bool.ng 'MATCH (n:Person)-[r:KNOWS {since: "
+                      "2025}]->(m:Person) RETURN n.name' > bool-relprop-empty.out") == 0);
         ef = fopen("bool-relprop-empty.expected", "wb");
         assert(ef);
         assert(fclose(ef) == 0);
@@ -2471,9 +2505,9 @@ int main(void) {
         fputs("Alice\tBob\n", ef);
         assert(fclose(ef) == 0);
         assert(same_file("bool-relset-search.out", "bool-relset-search.expected"));
-        assert(system(NAUTYLUS_CLI " query bool.ng 'MATCH (n:Person)-[r:KNOWS*1..2]->(m:Person) "
-                                   "SET r.bad = 1' > bool-badrelset.out 2> bool-badrelset.err") !=
-               0);
+        assert(system(NAUTYLUS_CLI
+                      " query bool.ng 'MATCH (n:Person)-[r:KNOWS*1..2]->(m:Person) "
+                      "SET r.bad = 1' > bool-badrelset.out 2> bool-badrelset.err") != 0);
         assert(system(NAUTYLUS_CLI " query bool.ng 'MATCH (n:Person)-[r:KNOWS]->(m:Person) WHERE "
                                    "r.strength = 7 DELETE r' > bool-reldelete.out") == 0);
         assert(system(NAUTYLUS_CLI
@@ -2557,17 +2591,17 @@ int main(void) {
         fputs("Bob\n", ef);
         assert(fclose(ef) == 0);
         assert(same_file("bool-multimatch-skip.out", "bool-multimatch-skip.expected"));
-        assert(
-            system(NAUTYLUS_CLI " query bool.ng 'MATCH (n:Person) MATCH (x:Person) WHERE x.name = "
-                                "\"Bob\" RETURN n.name, x.name LIMIT 1' > bool-varmatch.out") == 0);
+        assert(system(NAUTYLUS_CLI
+                      " query bool.ng 'MATCH (n:Person) MATCH (x:Person) WHERE x.name = "
+                      "\"Bob\" RETURN n.name, x.name LIMIT 1' > bool-varmatch.out") == 0);
         ef = fopen("bool-varmatch.expected", "wb");
         assert(ef);
         fputs("Alice\tBob\n", ef);
         assert(fclose(ef) == 0);
         assert(same_file("bool-varmatch.out", "bool-varmatch.expected"));
-        assert(system(NAUTYLUS_CLI " query bool.ng 'MATCH (n:Person) MATCH (x:Person) RETURN "
-                                   "z.name' > bool-badmultimatch.out 2> bool-badmultimatch.err") !=
-               0);
+        assert(system(NAUTYLUS_CLI
+                      " query bool.ng 'MATCH (n:Person) MATCH (x:Person) RETURN "
+                      "z.name' > bool-badmultimatch.out 2> bool-badmultimatch.err") != 0);
         assert(system(NAUTYLUS_CLI " query bool.ng 'MATCH (n:Person) WHERE n.name = \"Bob\" AND "
                                    "n.name = \"Alice\" RETURN n.name' > bool-and.out") == 0);
         ef = fopen("bool-and.expected", "wb");
@@ -2616,11 +2650,11 @@ int main(void) {
                 "2040}]-(friend) RETURN person.name, friend.name' > bool-merge-rel-reverse.out") ==
             0);
         assert(same_file("bool-merge-rel-reverse.out", "bool-create-rel.expected"));
-        assert(
-            system(NAUTYLUS_CLI " query bool.ng 'MATCH (person:Person) MATCH (friend:Person) WHERE "
-                                "person.name = \"Alice\" AND friend.name = \"Dana\" MERGE "
-                                "(person)<-[edge:KNOWS {since: 2040}]-(friend) RETURN person.name, "
-                                "friend.name' > bool-merge-rel-reverse-again.out") == 0);
+        assert(system(NAUTYLUS_CLI
+                      " query bool.ng 'MATCH (person:Person) MATCH (friend:Person) WHERE "
+                      "person.name = \"Alice\" AND friend.name = \"Dana\" MERGE "
+                      "(person)<-[edge:KNOWS {since: 2040}]-(friend) RETURN person.name, "
+                      "friend.name' > bool-merge-rel-reverse-again.out") == 0);
         assert(same_file("bool-merge-rel-reverse-again.out", "bool-create-rel.expected"));
         assert(
             system(
@@ -2928,9 +2962,9 @@ int main(void) {
         assert(system(NAUTYLUS_CLI
                       " query chain.ng 'MATCH (a:Person)-[:KNOWS]->(b)-[:WORKS_WITH]->(c) RETURN "
                       "z.name' > chain-bad-var.out 2> chain-bad-var.err") != 0);
-        assert(system(NAUTYLUS_CLI " query chain.ng 'MATCH (a:Person:Employee)-[:KNOWS]->(b) "
-                                   "RETURN a.name' > chain-bad-label.out 2> chain-bad-label.err") !=
-               0);
+        assert(system(NAUTYLUS_CLI
+                      " query chain.ng 'MATCH (a:Person:Employee)-[:KNOWS]->(b) "
+                      "RETURN a.name' > chain-bad-label.out 2> chain-bad-label.err") != 0);
         remove("chain.ng");
         remove("chain-nodes.tsv");
         remove("chain-rels.tsv");
@@ -2968,10 +3002,10 @@ int main(void) {
         FILE* ef;
         remove("fullcreate.ng");
         assert(system(NAUTYLUS_CLI " create fullcreate.ng > fullcreate-create.out") == 0);
-        assert(system(NAUTYLUS_CLI " query fullcreate.ng 'CREATE (a:Person {name: "
-                                   "\"Anton\"})-[r:KNOWS {since: 2026}]->(b:Person {name: "
-                                   "\"Stan\"}) RETURN a, b, r.since' > fullcreate-forward.out") ==
-               0);
+        assert(system(NAUTYLUS_CLI
+                      " query fullcreate.ng 'CREATE (a:Person {name: "
+                      "\"Anton\"})-[r:KNOWS {since: 2026}]->(b:Person {name: "
+                      "\"Stan\"}) RETURN a, b, r.since' > fullcreate-forward.out") == 0);
         ef = fopen("fullcreate-forward.expected", "wb");
         assert(ef);
         fputs("1\t2\t2026\n", ef);
@@ -2985,10 +3019,10 @@ int main(void) {
         fputs("Anton\t2026\tStan\n", ef);
         assert(fclose(ef) == 0);
         assert(same_file("fullcreate-forward-search.out", "fullcreate-forward-search.expected"));
-        assert(system(NAUTYLUS_CLI " query fullcreate.ng 'CREATE (a:Person {name: "
-                                   "\"A\"})<-[r:KNOWS {since: 2027}]-(b:Person {name: \"B\"}) "
-                                   "RETURN a.name, r.since, b.name' > fullcreate-reverse.out") ==
-               0);
+        assert(system(NAUTYLUS_CLI
+                      " query fullcreate.ng 'CREATE (a:Person {name: "
+                      "\"A\"})<-[r:KNOWS {since: 2027}]-(b:Person {name: \"B\"}) "
+                      "RETURN a.name, r.since, b.name' > fullcreate-reverse.out") == 0);
         ef = fopen("fullcreate-reverse.expected", "wb");
         assert(ef);
         fputs("A\t2027\tB\n", ef);
@@ -3060,10 +3094,10 @@ int main(void) {
         assert(fclose(ef) == 0);
         assert(same_file("fullcreate-comma-reverse-search.out",
                          "fullcreate-comma-reverse-search.expected"));
-        assert(system(NAUTYLUS_CLI " query fullcreate.ng 'CREATE (a:Person {name: "
-                                   "\"Bad\"})-[r]->(b:Person {name: \"MissingType\"}) RETURN "
-                                   "a.name' > fullcreate-bad-rel.out 2> fullcreate-bad-rel.err") !=
-               0);
+        assert(system(NAUTYLUS_CLI
+                      " query fullcreate.ng 'CREATE (a:Person {name: "
+                      "\"Bad\"})-[r]->(b:Person {name: \"MissingType\"}) RETURN "
+                      "a.name' > fullcreate-bad-rel.out 2> fullcreate-bad-rel.err") != 0);
         assert(system(NAUTYLUS_CLI
                       " query fullcreate.ng 'CREATE (bad:Person), RETURN bad' > "
                       "fullcreate-bad-comma-return.out 2> fullcreate-bad-comma-return.err") != 0);
@@ -3108,9 +3142,9 @@ int main(void) {
                    " query with.ng 'CREATE (a:Person {name: \"A\", age: 20})-[:KNOWS]->(b:Person "
                    "{name: \"B\", age: 17}), (a)-[:KNOWS]->(c:Person {name: \"C\", age: 30}), "
                    "(d:Person {name: \"A\", age: 40})' > with-seed.out") == 0);
-        assert(system(NAUTYLUS_CLI " query with.ng 'MATCH (a:Person) WITH a MATCH "
-                                   "(a)-[:KNOWS]->(b) RETURN a.name, b.name' > with-basic.out") ==
-               0);
+        assert(system(NAUTYLUS_CLI
+                      " query with.ng 'MATCH (a:Person) WITH a MATCH "
+                      "(a)-[:KNOWS]->(b) RETURN a.name, b.name' > with-basic.out") == 0);
         ef = fopen("with-basic.expected", "wb");
         assert(ef);
         fputs("A\tB\nA\tC\n", ef);
@@ -3332,9 +3366,9 @@ int main(void) {
         FILE* ef;
         remove("mapset.ng");
         assert(system(NAUTYLUS_CLI " create mapset.ng > mapset-create.out") == 0);
-        assert(system(NAUTYLUS_CLI " query mapset.ng 'CREATE (n:Person {name: \"A\", age: "
-                                   "30})-[:KNOWS {since: 2020}]->(m:Person)' > mapset-seed.out") ==
-               0);
+        assert(system(NAUTYLUS_CLI
+                      " query mapset.ng 'CREATE (n:Person {name: \"A\", age: "
+                      "30})-[:KNOWS {since: 2020}]->(m:Person)' > mapset-seed.out") == 0);
         assert(system(NAUTYLUS_CLI
                       " query mapset.ng 'MATCH (n:Person {name: \"A\"}) SET n += {city: "
                       "\"Berlin\", age: 31} RETURN n.name, n.age, n.city' > mapset-merge.out") ==
@@ -3586,6 +3620,91 @@ int main(void) {
         remove("unwind.ng");
         remove("unwind.out");
         remove("unwind.expected");
+    }
+    {
+        ng_graph* map_graph = NULL;
+        ng_graph* reopened = NULL;
+        FILE* map_output;
+        int mutated = 0;
+        size_t before;
+
+        assert(ng_create(&map_graph, "nested-map.ng") == NG_OK);
+        assert(query_tmp(map_graph,
+                         "CREATE (n:Map {profile: {name: \"Anton\", metrics: {score: 7}}}) "
+                         "RETURN n.profile",
+                         &mutated) == NG_OK);
+        assert(mutated && ng_node_count(map_graph) == 1);
+        map_output = fopen("nested-map.out", "wb");
+        assert(map_output);
+        assert(ng_query_execute(
+                   map_graph,
+                   "MATCH (n:Map) WITH n.profile AS profile RETURN profile, profile.metrics",
+                   map_output,
+                   &mutated) == NG_OK);
+        assert(fclose(map_output) == 0);
+        map_output = fopen("nested-map.out", "rb");
+        assert(map_output);
+        {
+            char output[256] = {0};
+            assert(fread(output, 1, sizeof(output) - 1, map_output) > 0);
+            assert(!strcmp(output, "{name: Anton, metrics: {score: 7}}\t{score: 7}\n"));
+        }
+        assert(fclose(map_output) == 0);
+
+        assert(query_tmp(map_graph,
+                         "MATCH (n:Map) SET n += {profile: {name: \"Berta\", active: true}} "
+                         "WITH n.profile AS profile RETURN profile.name",
+                         &mutated) == NG_OK);
+        assert(query_tmp(map_graph,
+                         "UNWIND [1, 2] AS x CREATE (n:RowMap {payload: {value: x, total: x + x}}) "
+                         "RETURN n.payload",
+                         &mutated) == NG_OK);
+        assert(
+            query_tmp(map_graph,
+                      "UNWIND [3] AS x MERGE (n:MergeMap {payload: {value: x}}) RETURN n.payload",
+                      &mutated) == NG_OK);
+        assert(query_tmp(map_graph,
+                         "WITH {outer: {value: 3}} AS data WITH data.outer AS inner "
+                         "RETURN inner.value",
+                         &mutated) == NG_OK);
+        assert(query_tmp(map_graph,
+                         "MATCH (n:Map) RETURN n.profile UNION MATCH (n:MergeMap) "
+                         "RETURN n.payload",
+                         &mutated) == NG_OK);
+        assert(query_tmp(map_graph,
+                         "MATCH (n:Map) RETURN n.profile UNION ALL MATCH (n:Map) "
+                         "RETURN n.profile",
+                         &mutated) == NG_OK);
+
+        before = ng_node_count(map_graph);
+        mutated = 99;
+        assert(query_tmp(map_graph,
+                         "UNWIND [8, 9] AS x CREATE (n:RollbackMap {payload: {value: x}}) "
+                         "SET missing.value = 1 RETURN n",
+                         &mutated) == NG_PARSE_ERROR);
+        assert(!mutated && ng_node_count(map_graph) == before && ng_validate(map_graph) == NG_OK);
+
+        assert(ng_save(map_graph) == NG_OK);
+        assert(ng_open(&reopened, "nested-map.ng") == NG_OK);
+        map_output = fopen("nested-map.out", "wb");
+        assert(map_output);
+        assert(ng_query_execute(reopened,
+                                "MATCH (n:Map) WITH n.profile AS profile RETURN profile",
+                                map_output,
+                                &mutated) == NG_OK);
+        assert(fclose(map_output) == 0);
+        map_output = fopen("nested-map.out", "rb");
+        assert(map_output);
+        {
+            char output[32] = {0};
+            assert(fread(output, 1, sizeof(output) - 1, map_output) > 0);
+            assert(!strcmp(output, "{name: Berta, active: true}\n"));
+        }
+        assert(fclose(map_output) == 0);
+        ng_close(reopened);
+        ng_close(map_graph);
+        remove("nested-map.ng");
+        remove("nested-map.out");
     }
     remove_import_files();
     remove("test.ng");

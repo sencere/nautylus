@@ -351,9 +351,10 @@ Important MiniCypher limitations:
 
 * It is not a full Cypher parser.
 * `ORDER BY` uses strict post-projection scope for `WITH`; hidden projection visibility is not implemented.
+* Map literals support nested maps and row-dependent scalar values in `WITH`, `RETURN`, `SET`, `CREATE`, and `MERGE`. Map values are printed in insertion order and are persisted in native snapshots.
 * Lists and complex values are printed and compared for equality, but are not meaningfully ordered.
 * Variable-length relationship patterns are supported in read `MATCH`, but not in `CREATE`/`MERGE` write patterns.
-* `ON CREATE`, `ON MATCH`, subqueries, path values, and general user-defined procedure calls are not implemented. The built-in `randomWalk` procedure is supported as documented above.
+* `ON CREATE`, `ON MATCH`, subqueries, and path values are not implemented. The built-in `randomWalk` procedure and graph-registered procedures using `CALL ... YIELD ...` are supported; procedure registration is available through the C API.
 * `UNWIND` currently expands scalar list literals, list-valued parameters, and list-valued properties.
 
 Example:

@@ -315,6 +315,8 @@ size_t path_count = 0;
 ng_random_walk(g, start, &options, path, 101, &path_count);
 ```
 
+Applications can register additional row procedures with `ng_procedure_register()`. A handler receives evaluated scalar arguments and fills named `ng_procedure_field` results. Query syntax is `CALL name(expr, ...) YIELD field, ...`; yielded scalar, node, and relationship values can be consumed by later `WITH`, `MATCH`, and `RETURN` clauses. Registrations belong to the graph handle and are copied into transactional working graphs.
+
 Supported predicate literals:
 
 * quoted strings without escape sequences;
@@ -325,7 +327,7 @@ Supported predicate literals:
 
 `ng_query_explain()` parses the same subset and writes a short textual plan into a caller-provided buffer.
 
-Unsupported syntax returns `NG_PARSE_ERROR`. General user-defined procedure calls, path values, subqueries, and full Cypher compatibility are not implemented.
+Unsupported syntax returns `NG_PARSE_ERROR`. Nested map values are supported through `NG_VALUE_MAP`; map literals can be evaluated in `WITH`, `RETURN`, `SET`, `CREATE`, and `MERGE`. Path values, subqueries, and full Cypher compatibility are not implemented.
 
 ## Analytics
 

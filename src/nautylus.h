@@ -26,13 +26,16 @@ typedef enum {
     NG_VALUE_DOUBLE,
     NG_VALUE_STRING,
     NG_VALUE_BYTES,
-    NG_VALUE_LIST
+    NG_VALUE_LIST,
+    NG_VALUE_MAP
 } ng_value_type;
 typedef enum {
     NG_NODE_CONSTRAINT_REQUIRED_PROPERTY = 1,
     NG_NODE_CONSTRAINT_UNIQUE_PROPERTY = 2
 } ng_node_constraint_kind;
 typedef struct ng_value ng_value;
+typedef struct ng_value_map_entry ng_value_map_entry;
+typedef struct ng_value_map ng_value_map;
 typedef struct {
     size_t count;
     ng_value* items;
@@ -47,7 +50,16 @@ struct ng_value {
         const char* string;
         const unsigned char* bytes;
         const ng_value_list* list;
+        const ng_value_map* map;
     } as;
+};
+struct ng_value_map_entry {
+    const char* key;
+    ng_value value;
+};
+struct ng_value_map {
+    size_t count;
+    ng_value_map_entry* entries;
 };
 typedef struct {
     ng_symbol_id key;
@@ -60,6 +72,27 @@ typedef struct {
 typedef struct ng_graph ng_graph;
 typedef struct ng_transaction ng_transaction;
 typedef struct ng_node_index ng_node_index;
+typedef enum {
+    NG_PROCEDURE_SCALAR = 0,
+    NG_PROCEDURE_NODE = 1,
+    NG_PROCEDURE_RELATIONSHIP = 2
+} ng_procedure_value_kind;
+typedef struct {
+    const char* name;
+    ng_procedure_value_kind kind;
+    ng_id id;
+    ng_value value;
+} ng_procedure_field;
+typedef struct {
+    ng_procedure_field* fields;
+    size_t field_count;
+    size_t field_capacity;
+} ng_procedure_result;
+typedef ng_status (*ng_procedure_handler)(const ng_graph* graph,
+                                          const ng_value* arguments,
+                                          size_t argument_count,
+                                          ng_procedure_result* result,
+                                          void* context);
 typedef struct {
     ng_node_id id;
 } ng_node;
@@ -247,6 +280,9 @@ ng_status ng_node_index_drop(ng_graph* g, ng_symbol_id label, ng_symbol_id key);
 size_t ng_node_index_count(const ng_graph* g);
 ng_status
 ng_node_index_get(const ng_graph* g, size_t index, ng_symbol_id* label, ng_symbol_id* key);
+ng_status
+ng_procedure_register(ng_graph* g, const char* name, ng_procedure_handler handler, void* context);
+ng_status ng_procedure_unregister(ng_graph* g, const char* name);
 ng_status ng_transaction_begin(ng_graph* g, ng_transaction** out);
 ng_graph* ng_transaction_graph(ng_transaction* transaction);
 ng_status ng_transaction_commit(ng_transaction* transaction);

@@ -87,6 +87,11 @@ typedef struct {
 typedef struct {
     ng_symbol_id label, key;
 } index_i;
+typedef struct {
+    char* name;
+    ng_procedure_handler handler;
+    void* context;
+} procedure_i;
 struct ng_graph {
     char* path;
     uint64_t next_node, next_rel, next_sym;
@@ -103,6 +108,8 @@ struct ng_graph {
     size_t* ao;
     size_t* ai;
     size_t an;
+    procedure_i* procedures;
+    size_t procedure_count, procedure_capacity;
 };
 struct ng_transaction {
     ng_graph* target;
@@ -120,6 +127,8 @@ struct ng_node_index {
 };
 static ng_status ng_validate_constraints_all(const ng_graph* g);
 static int ng_value_equal(const ng_value* a, const ng_value* b);
+static void valfree(ng_value* v);
+static int ng_ident_char(int c);
 static int ng_node_matches_label(const node_i* n, ng_symbol_id label);
 static size_t ng_node_position(const ng_graph* g, ng_node_id id);
 static int grow(void** p, size_t* cap, size_t n, size_t z) {
@@ -237,6 +246,25 @@ static int avalue(blob* b, const ng_value* v) {
         memcpy(&u, &v->as.real, 8);
         return a64(b, u);
     }
+    if (v->type == NG_VALUE_LIST) {
+        size_t i;
+        if (!v->as.list)
+            return 1;
+        for (i = 0; i < v->as.list->count; i++)
+            if (!avalue(b, &v->as.list->items[i]))
+                return 0;
+        return 1;
+    }
+    if (v->type == NG_VALUE_MAP) {
+        size_t i;
+        if (!v->as.map)
+            return 1;
+        for (i = 0; i < v->as.map->count; i++)
+            if (!astr(b, v->as.map->entries[i].key, strlen(v->as.map->entries[i].key)) ||
+                !avalue(b, &v->as.map->entries[i].value))
+                return 0;
+        return 1;
+    }
     return 1;
 }
 static int aprop(blob* b, const prop* p) {
@@ -337,7 +365,7 @@ static int take_bytes(cursor* c, const unsigned char** p, size_t n) {
 static int load_value(cursor* c, ng_value* v) {
     uint64_t t, n, u;
     const unsigned char* p;
-    if (!take64(c, &t) || !take64(c, &n) || t > NG_VALUE_BYTES || n > SIZE_MAX)
+    if (!take64(c, &t) || !take64(c, &n) || t > NG_VALUE_MAP || n > SIZE_MAX)
         return 0;
     memset(v, 0, sizeof(*v));
     v->type = (ng_value_type)t;
@@ -366,6 +394,68 @@ static int load_value(cursor* c, ng_value* v) {
             v->as.integer = (int64_t)u;
         else
             memcpy(&v->as.real, &u, 8);
+    } else if (t == NG_VALUE_LIST) {
+        size_t i;
+        ng_value_list* list = (ng_value_list*)calloc(1, sizeof(*list));
+        if (!list)
+            return 0;
+        list->count = (size_t)n;
+        if (list->count) {
+            list->items = (ng_value*)calloc(list->count, sizeof(*list->items));
+            if (!list->items) {
+                free(list);
+                return 0;
+            }
+            for (i = 0; i < list->count; i++) {
+                if (!load_value(c, &list->items[i])) {
+                    v->type = NG_VALUE_LIST;
+                    v->as.list = list;
+                    valfree(v);
+                    return 0;
+                }
+            }
+        }
+        v->as.list = list;
+    } else if (t == NG_VALUE_MAP) {
+        size_t i;
+        ng_value_map* map = (ng_value_map*)calloc(1, sizeof(*map));
+        if (!map)
+            return 0;
+        map->count = (size_t)n;
+        if (map->count) {
+            map->entries = (ng_value_map_entry*)calloc(map->count, sizeof(*map->entries));
+            if (!map->entries) {
+                free(map);
+                return 0;
+            }
+            for (i = 0; i < map->count; i++) {
+                uint64_t key_length;
+                const unsigned char* key_data;
+                if (!take64(c, &key_length) || key_length > SIZE_MAX ||
+                    !take_bytes(c, &key_data, (size_t)key_length)) {
+                    v->type = NG_VALUE_MAP;
+                    v->as.map = map;
+                    valfree(v);
+                    return 0;
+                }
+                map->entries[i].key = (char*)malloc((size_t)key_length + 1);
+                if (!map->entries[i].key) {
+                    v->type = NG_VALUE_MAP;
+                    v->as.map = map;
+                    valfree(v);
+                    return 0;
+                }
+                memcpy((char*)map->entries[i].key, key_data, (size_t)key_length);
+                ((char*)map->entries[i].key)[key_length] = 0;
+                if (!load_value(c, &map->entries[i].value)) {
+                    v->type = NG_VALUE_MAP;
+                    v->as.map = map;
+                    valfree(v);
+                    return 0;
+                }
+            }
+        }
+        v->as.map = map;
     }
     return 1;
 }
@@ -570,6 +660,15 @@ static void valfree(ng_value* v) {
             valfree(&l->items[i]);
         free(l->items);
         free(l);
+    } else if (v->type == NG_VALUE_MAP && v->as.map) {
+        size_t i;
+        ng_value_map* map = (ng_value_map*)v->as.map;
+        for (i = 0; i < map->count; i++) {
+            free((void*)map->entries[i].key);
+            valfree(&map->entries[i].value);
+        }
+        free(map->entries);
+        free(map);
     }
 }
 static ng_status valcopy(ng_value* dst, const ng_value* src) {
@@ -613,11 +712,41 @@ static ng_status valcopy(ng_value* dst, const ng_value* src) {
         }
         dst->as.list = l;
         dst->length = l->count;
+    } else if (src->type == NG_VALUE_MAP) {
+        size_t i;
+        ng_value_map* map;
+        if (!src->as.map) {
+            dst->as.map = NULL;
+            return NG_OK;
+        }
+        map = (ng_value_map*)calloc(1, sizeof(*map));
+        if (!map)
+            return NG_OOM;
+        map->count = src->as.map->count;
+        if (map->count) {
+            map->entries = (ng_value_map_entry*)calloc(map->count, sizeof(*map->entries));
+            if (!map->entries) {
+                free(map);
+                return NG_OOM;
+            }
+            for (i = 0; i < map->count; i++) {
+                map->entries[i].key = dupstr(src->as.map->entries[i].key);
+                if (!map->entries[i].key ||
+                    valcopy(&map->entries[i].value, &src->as.map->entries[i].value) != NG_OK) {
+                    ng_value tmp = {.type = NG_VALUE_MAP, .as.map = map};
+                    valfree(&tmp);
+                    return NG_OOM;
+                }
+            }
+        }
+        dst->as.map = map;
+        dst->length = map->count;
     }
     return NG_OK;
 }
 static int ng_valid_value(const ng_value* v) {
-    if (!v || v->type > NG_VALUE_BYTES)
+    size_t i;
+    if (!v || v->type > NG_VALUE_MAP)
         return 0;
     if (v->type == NG_VALUE_BOOL && (v->as.boolean != 0 && v->as.boolean != 1))
         return 0;
@@ -625,6 +754,28 @@ static int ng_valid_value(const ng_value* v) {
         return 0;
     if (v->type == NG_VALUE_BYTES && v->length && !v->as.bytes)
         return 0;
+    if (v->type == NG_VALUE_LIST) {
+        if (v->length && !v->as.list)
+            return 0;
+        if (!v->as.list)
+            return 1;
+        if (v->length != v->as.list->count)
+            return 0;
+        for (i = 0; i < v->as.list->count; i++)
+            if (!ng_valid_value(&v->as.list->items[i]))
+                return 0;
+    }
+    if (v->type == NG_VALUE_MAP) {
+        if (v->length && !v->as.map)
+            return 0;
+        if (!v->as.map)
+            return 1;
+        if (v->length != v->as.map->count)
+            return 0;
+        for (i = 0; i < v->as.map->count; i++)
+            if (!v->as.map->entries[i].key || !ng_valid_value(&v->as.map->entries[i].value))
+                return 0;
+    }
     return 1;
 }
 void ng_close(ng_graph* g) {
@@ -652,6 +803,9 @@ void ng_close(ng_graph* g) {
     free(g->ix);
     free(g->ao);
     free(g->ai);
+    for (i = 0; i < g->procedure_count; i++)
+        free(g->procedures[i].name);
+    free(g->procedures);
     free(g->path);
     free(g);
 }
@@ -777,17 +931,10 @@ static ng_status setprop(prop** pp, size_t* n, size_t* cap, ng_symbol_id k, cons
     ng_value copy;
     if (!v || !k)
         return NG_INVALID_ARGUMENT;
-    copy = *v;
-    if (v->type == NG_VALUE_STRING) {
-        copy.as.string = dupstr(v->as.string);
-        if (!copy.as.string)
-            return NG_OOM;
-    } else if (v->type == NG_VALUE_BYTES) {
-        copy.as.bytes = (unsigned char*)malloc(v->length);
-        if (v->length && !copy.as.bytes)
-            return NG_OOM;
-        memcpy((void*)copy.as.bytes, v->as.bytes, v->length);
-    }
+    if (!ng_valid_value(v))
+        return NG_INVALID_ARGUMENT;
+    if (valcopy(&copy, v) != NG_OK)
+        return NG_OOM;
     for (i = 0; i < *n; i++)
         if ((*pp)[i].key == k) {
             valfree(&(*pp)[i].v);
@@ -837,8 +984,7 @@ ng_status ng_node_set(ng_graph* g, ng_id id, ng_symbol_id k, const ng_value* v) 
     ng_status s;
     if (!g || !v || !k)
         return NG_INVALID_ARGUMENT;
-    if (v->type > NG_VALUE_BYTES || (v->type == NG_VALUE_STRING && !v->as.string) ||
-        (v->type == NG_VALUE_BYTES && v->length && !v->as.bytes))
+    if (!ng_valid_value(v))
         return NG_INVALID_ARGUMENT;
     if (!n)
         return NG_NOT_FOUND;
@@ -940,8 +1086,7 @@ ng_status ng_relationship_set(ng_graph* g, ng_id id, ng_symbol_id k, const ng_va
     size_t i;
     if (!g || !v)
         return NG_INVALID_ARGUMENT;
-    if (v->type > NG_VALUE_BYTES || (v->type == NG_VALUE_STRING && !v->as.string) ||
-        (v->type == NG_VALUE_BYTES && v->length && !v->as.bytes))
+    if (!ng_valid_value(v))
         return NG_INVALID_ARGUMENT;
     for (i = 0; i < g->nr; i++)
         if (g->re[i].id == id)
@@ -1886,6 +2031,18 @@ static int ng_value_equal(const ng_value* a, const ng_value* b) {
                 return 0;
         return 1;
     }
+    if (a->type == NG_VALUE_MAP) {
+        if (!a->as.map || !b->as.map)
+            return a->as.map == b->as.map;
+        if (a->as.map->count != b->as.map->count)
+            return 0;
+        for (i = 0; i < a->as.map->count; i++) {
+            if (strcmp(a->as.map->entries[i].key, b->as.map->entries[i].key) ||
+                !ng_value_equal(&a->as.map->entries[i].value, &b->as.map->entries[i].value))
+                return 0;
+        }
+        return 1;
+    }
     return 0;
 }
 static int ng_query_compare_match(const ng_value* a, const ng_value* b, int op);
@@ -1934,7 +2091,7 @@ ng_status ng_find_nodes(const ng_graph* g,
     size_t i, j;
     if (!g || !v || !key || !visit)
         return NG_INVALID_ARGUMENT;
-    if (v->type > NG_VALUE_BYTES)
+    if (!ng_valid_value(v))
         return NG_INVALID_ARGUMENT;
     for (i = 0; i < g->nn; i++) {
         int has = label == 0;
@@ -2187,7 +2344,7 @@ ng_status ng_node_index_find(const ng_node_index* idx,
     size_t i;
     if (!idx || !v || !visit)
         return NG_INVALID_ARGUMENT;
-    if (v->type > NG_VALUE_BYTES)
+    if (!ng_valid_value(v))
         return NG_INVALID_ARGUMENT;
     for (i = 0; i < idx->count; i++)
         if (ng_value_equal(&idx->entries[i].value, v) && !visit(idx->entries[i].id, ctx))
@@ -2202,6 +2359,51 @@ void ng_node_index_free(ng_node_index* idx) {
         valfree(&idx->entries[i].value);
     free(idx->entries);
     free(idx);
+}
+static int ng_procedure_name_valid(const char* name) {
+    if (!name || !ng_ident_char((unsigned char)*name) || isdigit((unsigned char)*name))
+        return 0;
+    while (*name)
+        if (!ng_ident_char((unsigned char)*name++))
+            return 0;
+    return 1;
+}
+ng_status
+ng_procedure_register(ng_graph* g, const char* name, ng_procedure_handler handler, void* context) {
+    size_t i;
+    if (!g || !ng_procedure_name_valid(name) || !handler)
+        return NG_INVALID_ARGUMENT;
+    for (i = 0; i < g->procedure_count; i++)
+        if (!strcmp(g->procedures[i].name, name))
+            return NG_EXISTS;
+    if (!grow((void**)&g->procedures,
+              &g->procedure_capacity,
+              g->procedure_count + 1,
+              sizeof(*g->procedures)))
+        return NG_OOM;
+    g->procedures[g->procedure_count].name = dupstr(name);
+    if (!g->procedures[g->procedure_count].name)
+        return NG_OOM;
+    g->procedures[g->procedure_count].handler = handler;
+    g->procedures[g->procedure_count].context = context;
+    g->procedure_count++;
+    return NG_OK;
+}
+ng_status ng_procedure_unregister(ng_graph* g, const char* name) {
+    size_t i;
+    if (!g || !name)
+        return NG_INVALID_ARGUMENT;
+    for (i = 0; i < g->procedure_count; i++)
+        if (!strcmp(g->procedures[i].name, name)) {
+            free(g->procedures[i].name);
+            if (i + 1 < g->procedure_count)
+                memmove(&g->procedures[i],
+                        &g->procedures[i + 1],
+                        (g->procedure_count - i - 1) * sizeof(*g->procedures));
+            g->procedure_count--;
+            return NG_OK;
+        }
+    return NG_NOT_FOUND;
 }
 #define NG_QUERY_MAX_TERMS 8
 #define NG_QUERY_MAX_LIST_VALUES 8
@@ -3520,6 +3722,19 @@ static int ng_print_value(FILE* out, const ng_value* v) {
             }
         return fputc(']', out) != EOF;
     }
+    if (v->type == NG_VALUE_MAP) {
+        if (fputc('{', out) == EOF)
+            return 0;
+        if (v->as.map)
+            for (i = 0; i < v->as.map->count; i++) {
+                if (i && fputs(", ", out) < 0)
+                    return 0;
+                if (fprintf(out, "%s: ", v->as.map->entries[i].key) < 0 ||
+                    !ng_print_value(out, &v->as.map->entries[i].value))
+                    return 0;
+            }
+        return fputc('}', out) != EOF;
+    }
     return 0;
 }
 static ng_status ng_query_print_node_item(
@@ -3824,8 +4039,7 @@ static ng_status ng_query_parameters_valid(const ng_parameter* p, size_t n) {
     if (n && !p)
         return NG_INVALID_ARGUMENT;
     for (i = 0; i < n; i++)
-        if (!ng_parameter_name_valid(p[i].name) || p[i].value.type > NG_VALUE_LIST ||
-            (p[i].value.type == NG_VALUE_LIST && !p[i].value.as.list))
+        if (!ng_parameter_name_valid(p[i].name) || !ng_valid_value(&p[i].value))
             return NG_INVALID_ARGUMENT;
     return NG_OK;
 }
@@ -3964,6 +4178,9 @@ typedef struct {
         list_items[NG_QUERY_MAX_LIST_VALUES];
     char key[128];
     ng_value value;
+    size_t map_count;
+    char map_keys[NG_QUERY_MAX_PROPS][128];
+    int map_items[NG_QUERY_MAX_PROPS];
 } ng_cy_scalar;
 typedef struct {
     int var_index, is_property, is_id, scalar_index, out_var_index, out_kind, aggregate,
@@ -4612,6 +4829,47 @@ static ng_status ng_cy_parse_scalar_primary(const char** pp, ng_cy_query* q, int
         *pp = ng_skip_ws(p + 1);
         return NG_OK;
     }
+    if (*p == '{') {
+        int map = ng_cy_scalar_add(q, 8, -1, -1, -1, NULL, NULL);
+        if (map < 0)
+            return NG_PARSE_ERROR;
+        p = ng_skip_ws(p + 1);
+        if (*p != '}')
+            for (;;) {
+                const char* key_start = p;
+                size_t key_length;
+                int item;
+                if (q->scalars[map].map_count >= NG_QUERY_MAX_PROPS)
+                    return NG_PARSE_ERROR;
+                if (!ng_ident_char((unsigned char)*p) || isdigit((unsigned char)*p))
+                    return NG_PARSE_ERROR;
+                while (ng_ident_char((unsigned char)*p))
+                    p++;
+                key_length = (size_t)(p - key_start);
+                if (!key_length || key_length >= sizeof(q->scalars[map].map_keys[0]))
+                    return NG_PARSE_ERROR;
+                memcpy(q->scalars[map].map_keys[q->scalars[map].map_count], key_start, key_length);
+                q->scalars[map].map_keys[q->scalars[map].map_count][key_length] = 0;
+                p = ng_skip_ws(p);
+                if (*p != ':')
+                    return NG_PARSE_ERROR;
+                p = ng_skip_ws(p + 1);
+                if (ng_cy_parse_scalar_add(&p, q, &item) != NG_OK)
+                    return NG_PARSE_ERROR;
+                q->scalars[map].map_items[q->scalars[map].map_count++] = item;
+                p = ng_skip_ws(p);
+                if (*p != ',')
+                    break;
+                p = ng_skip_ws(p + 1);
+                if (*p == '}')
+                    return NG_PARSE_ERROR;
+            }
+        if (*p != '}')
+            return NG_PARSE_ERROR;
+        *out = map;
+        *pp = ng_skip_ws(p + 1);
+        return NG_OK;
+    }
     if (!strncmp(p, "id(", 3)) {
         p = ng_skip_ws(p + 3);
         if (ng_cy_parse_ident(&p, name, sizeof(name)) != NG_OK)
@@ -4645,8 +4903,6 @@ static ng_status ng_cy_parse_scalar_primary(const char** pp, ng_cy_query* q, int
         return NG_PARSE_ERROR;
     key[0] = 0;
     if (*p == '.') {
-        if (q->vars[vi].kind == 3)
-            return NG_PARSE_ERROR;
         p++;
         s = p;
         while (ng_ident_char((unsigned char)*p))
@@ -5208,8 +5464,19 @@ static ng_status ng_cy_eval_scalar(
                 out->length = 0;
                 return NG_OK;
             }
-            if (s->key[0])
-                return NG_PARSE_ERROR;
+            if (s->key[0]) {
+                size_t map_index;
+                if (bind.value.type != NG_VALUE_MAP || !bind.value.as.map)
+                    return NG_PARSE_ERROR;
+                for (map_index = 0; map_index < bind.value.as.map->count; map_index++)
+                    if (!strcmp(bind.value.as.map->entries[map_index].key, s->key)) {
+                        *out = bind.value.as.map->entries[map_index].value;
+                        return NG_OK;
+                    }
+                out->type = NG_VALUE_NULL;
+                out->length = 0;
+                return NG_OK;
+            }
             *out = bind.value;
             return NG_OK;
         }
@@ -5239,6 +5506,81 @@ static ng_status ng_cy_eval_scalar(
             return NG_OK;
         }
         *out = pr->v;
+        return NG_OK;
+    }
+    if (s->kind == 7) {
+        ng_value_list* list = (ng_value_list*)calloc(1, sizeof(*list));
+        size_t j;
+        if (!list)
+            return NG_OOM;
+        list->count = (size_t)s->list_count;
+        if (list->count) {
+            list->items = (ng_value*)calloc(list->count, sizeof(*list->items));
+            if (!list->items) {
+                free(list);
+                return NG_OOM;
+            }
+            for (j = 0; j < list->count; j++) {
+                ng_value evaluated;
+                if (ng_cy_eval_scalar(g, q, row, s->list_items[j], &evaluated) != NG_OK) {
+                    ng_value cleanup = {.type = NG_VALUE_LIST, .as.list = list};
+                    valfree(&cleanup);
+                    return NG_PARSE_ERROR;
+                }
+                if (valcopy(&list->items[j], &evaluated) != NG_OK) {
+                    if (q->scalars[s->list_items[j]].kind == 7 ||
+                        q->scalars[s->list_items[j]].kind == 8)
+                        valfree(&evaluated);
+                    ng_value cleanup = {.type = NG_VALUE_LIST, .as.list = list};
+                    valfree(&cleanup);
+                    return NG_OOM;
+                }
+                if (q->scalars[s->list_items[j]].kind == 7 ||
+                    q->scalars[s->list_items[j]].kind == 8)
+                    valfree(&evaluated);
+            }
+        }
+        out->type = NG_VALUE_LIST;
+        out->length = list->count;
+        out->as.list = list;
+        return NG_OK;
+    }
+    if (s->kind == 8) {
+        ng_value_map* map = (ng_value_map*)calloc(1, sizeof(*map));
+        size_t j;
+        if (!map)
+            return NG_OOM;
+        map->count = s->map_count;
+        if (map->count) {
+            map->entries = (ng_value_map_entry*)calloc(map->count, sizeof(*map->entries));
+            if (!map->entries) {
+                free(map);
+                return NG_OOM;
+            }
+            for (j = 0; j < map->count; j++) {
+                ng_value evaluated;
+                map->entries[j].key = dupstr(s->map_keys[j]);
+                if (!map->entries[j].key ||
+                    ng_cy_eval_scalar(g, q, row, s->map_items[j], &evaluated) != NG_OK) {
+                    ng_value cleanup = {.type = NG_VALUE_MAP, .as.map = map};
+                    valfree(&cleanup);
+                    return NG_PARSE_ERROR;
+                }
+                if (valcopy(&map->entries[j].value, &evaluated) != NG_OK) {
+                    if (q->scalars[s->map_items[j]].kind == 7 ||
+                        q->scalars[s->map_items[j]].kind == 8)
+                        valfree(&evaluated);
+                    ng_value cleanup = {.type = NG_VALUE_MAP, .as.map = map};
+                    valfree(&cleanup);
+                    return NG_OOM;
+                }
+                if (q->scalars[s->map_items[j]].kind == 7 || q->scalars[s->map_items[j]].kind == 8)
+                    valfree(&evaluated);
+            }
+        }
+        out->type = NG_VALUE_MAP;
+        out->length = map->count;
+        out->as.map = map;
         return NG_OK;
     }
     if (s->kind == 6) {
@@ -5389,6 +5731,25 @@ static int ng_cy_has_write_clause(const char* q) {
         if (ng_cy_clause_starts(p, "CREATE") || ng_cy_clause_starts(p, "MERGE") ||
             ng_cy_clause_starts(p, "SET") || ng_cy_clause_starts(p, "DELETE") ||
             ng_cy_clause_starts(p, "DETACH") || ng_cy_clause_starts(p, "REMOVE"))
+            return 1;
+        p++;
+    }
+    return 0;
+}
+static int ng_query_has_union(const char* query) {
+    const char* p = query;
+    while (*p) {
+        if (*p == '"') {
+            p++;
+            while (*p && *p != '"')
+                p++;
+            if (!*p)
+                return 0;
+            p++;
+            continue;
+        }
+        if (!strncmp(p, "UNION", 5) && (p == query || !ng_ident_char((unsigned char)p[-1])) &&
+            !ng_ident_char((unsigned char)p[5]))
             return 1;
         p++;
     }
@@ -6275,6 +6636,7 @@ static ng_status ng_cy_apply_set_to_rows(
         if (*p == '=' || (p[0] == '+' && p[1] == '=')) {
             int replace = *p == '=';
             ng_query_prop props[NG_QUERY_MAX_PROPS];
+            int prop_scalars[NG_QUERY_MAX_PROPS];
             ng_property map[NG_QUERY_MAX_PROPS];
             size_t prop_count = 0;
             if (replace)
@@ -6282,18 +6644,33 @@ static ng_status ng_cy_apply_set_to_rows(
             else
                 p += 2;
             p = ng_skip_ws(p);
-            if (ng_query_parse_prop_map(&p, props, &prop_count) != NG_OK)
+            if (ng_cy_parse_expr_map(&p, q, props, prop_scalars, &prop_count) != NG_OK)
                 return NG_PARSE_ERROR;
             for (i = 0; i < prop_count; i++) {
                 if (ng_symbol(g, props[i].key, &map[i].key) != NG_OK)
                     return NG_OOM;
-                s = ng_query_resolve_value(&props[i].value, &map[i].value);
-                if (s != NG_OK)
-                    return s;
             }
             for (i = 0; i < row_count; i++) {
+                size_t property_index;
+                for (property_index = 0; property_index < prop_count; property_index++) {
+                    s = ng_cy_eval_scalar(
+                        g, q, &rows[i], prop_scalars[property_index], &map[property_index].value);
+                    if (s != NG_OK) {
+                        while (property_index > 0) {
+                            property_index--;
+                            if (q->scalars[prop_scalars[property_index]].kind == 7 ||
+                                q->scalars[prop_scalars[property_index]].kind == 8)
+                                valfree(&map[property_index].value);
+                        }
+                        return s;
+                    }
+                }
                 s = ng_cy_apply_map_to_binding(
                     g, rows[i].values[vi], map, prop_count, replace, changed);
+                for (property_index = 0; property_index < prop_count; property_index++)
+                    if (q->scalars[prop_scalars[property_index]].kind == 7 ||
+                        q->scalars[prop_scalars[property_index]].kind == 8)
+                        valfree(&map[property_index].value);
                 if (s != NG_OK)
                     return s;
             }
@@ -6711,6 +7088,116 @@ static ng_status ng_cy_apply_random_walk(
     *pp = p;
     return NG_OK;
 }
+static procedure_i* ng_find_procedure(ng_graph* g, const char* name) {
+    size_t i;
+    for (i = 0; i < g->procedure_count; i++)
+        if (!strcmp(g->procedures[i].name, name))
+            return &g->procedures[i];
+    return NULL;
+}
+static ng_status ng_cy_apply_registered_procedure(
+    ng_graph* g, ng_cy_query* q, ng_cy_row** rows, size_t* row_count, const char** pp) {
+    const char* p = ng_skip_ws(*pp + 4);
+    char procedure_name[128];
+    int arguments[NG_CY_MAX_RETURNS];
+    char yield_names[NG_CY_MAX_RETURNS][64];
+    int yield_indices[NG_CY_MAX_RETURNS];
+    ng_cy_row* output = NULL;
+    size_t argument_count = 0, yield_count = 0, output_count = 0, output_capacity = 0, i;
+    procedure_i* procedure;
+    if (ng_cy_parse_ident(&p, procedure_name, sizeof(procedure_name)) != NG_OK)
+        return NG_PARSE_ERROR;
+    if (!strcmp(procedure_name, "randomWalk"))
+        return ng_cy_apply_random_walk(g, q, rows, row_count, pp);
+    procedure = ng_find_procedure(g, procedure_name);
+    if (!procedure)
+        return NG_NOT_FOUND;
+    p = ng_skip_ws(p);
+    if (*p != '(')
+        return NG_PARSE_ERROR;
+    p = ng_skip_ws(p + 1);
+    if (*p != ')')
+        for (;;) {
+            if (argument_count >= NG_CY_MAX_RETURNS ||
+                ng_cy_parse_scalar_add(&p, q, &arguments[argument_count]) != NG_OK)
+                return NG_PARSE_ERROR;
+            argument_count++;
+            p = ng_skip_ws(p);
+            if (*p != ',')
+                break;
+            p = ng_skip_ws(p + 1);
+        }
+    if (*p != ')')
+        return NG_PARSE_ERROR;
+    p = ng_skip_ws(p + 1);
+    if (!ng_cy_clause_starts(p, "YIELD"))
+        return NG_PARSE_ERROR;
+    p = ng_skip_ws(p + 5);
+    for (;;) {
+        if (yield_count >= NG_CY_MAX_RETURNS ||
+            ng_cy_parse_ident(&p, yield_names[yield_count], sizeof(yield_names[0])) != NG_OK)
+            return NG_PARSE_ERROR;
+        yield_indices[yield_count] = ng_cy_var_index(q, yield_names[yield_count], 3, 1);
+        if (yield_indices[yield_count] < 0)
+            return NG_PARSE_ERROR;
+        yield_count++;
+        p = ng_skip_ws(p);
+        if (*p != ',')
+            break;
+        p = ng_skip_ws(p + 1);
+    }
+    *pp = p;
+    for (i = 0; i < *row_count; i++) {
+        ng_value values[NG_CY_MAX_RETURNS];
+        ng_procedure_field fields[NG_CY_MAX_RETURNS];
+        ng_procedure_result result;
+        ng_cy_row input = (*rows)[i];
+        size_t j;
+        for (j = 0; j < argument_count; j++) {
+            ng_status s = ng_cy_eval_scalar(g, q, &input, arguments[j], &values[j]);
+            if (s != NG_OK) {
+                free(output);
+                return s;
+            }
+        }
+        memset(fields, 0, sizeof(fields));
+        result.fields = fields;
+        result.field_capacity = NG_CY_MAX_RETURNS;
+        result.field_count = 0;
+        if (procedure->handler(g, values, argument_count, &result, procedure->context) != NG_OK) {
+            free(output);
+            return NG_PARSE_ERROR;
+        }
+        if (result.field_count > result.field_capacity) {
+            free(output);
+            return NG_LIMIT;
+        }
+        for (j = 0; j < yield_count; j++) {
+            size_t field_index;
+            for (field_index = 0; field_index < result.field_count; field_index++)
+                if (!strcmp(result.fields[field_index].name, yield_names[j]))
+                    break;
+            if (field_index == result.field_count) {
+                free(output);
+                return NG_PARSE_ERROR;
+            }
+            input.values[yield_indices[j]].kind =
+                result.fields[field_index].kind == NG_PROCEDURE_SCALAR
+                    ? 3
+                    : (int)result.fields[field_index].kind;
+            input.values[yield_indices[j]].id = result.fields[field_index].id;
+            input.values[yield_indices[j]].value = result.fields[field_index].value;
+        }
+        if (!ng_cy_append_row(&output, &output_count, &output_capacity, &input)) {
+            free(output);
+            return output_count >= NG_CY_MAX_ROWS ? NG_LIMIT : NG_OOM;
+        }
+    }
+    free(*rows);
+    *rows = output;
+    *row_count = output_count;
+    return NG_OK;
+}
 static ng_status
 ng_query_execute_with(ng_graph* g, const char* q, FILE* out, int* mutated, int* handled) {
     const char* p = ng_skip_ws(q);
@@ -6721,7 +7208,7 @@ ng_query_execute_with(ng_graph* g, const char* q, FILE* out, int* mutated, int* 
     int did_write = 0, last_write = 0;
     if (handled)
         *handled = 0;
-    if (!ng_cy_has_with(p))
+    if (!ng_cy_has_with(p) && !strstr(p, " CALL ") && !strstr(p, " CALL\t"))
         return NG_OK;
     if (handled)
         *handled = 1;
@@ -6808,7 +7295,7 @@ ng_query_execute_with(ng_graph* g, const char* q, FILE* out, int* mutated, int* 
             if (s != NG_OK)
                 break;
         } else if (ng_cy_clause_starts(p, "CALL")) {
-            s = ng_cy_apply_random_walk(g, &cy, &rows, &row_count, &p);
+            s = ng_cy_apply_registered_procedure(g, &cy, &rows, &row_count, &p);
             if (s != NG_OK)
                 break;
         } else if (ng_cy_clause_starts(p, "REMOVE")) {
@@ -7984,6 +8471,8 @@ static int ng_query_is_match_write_tail(const char* tail) {
            (!strncmp(tail, "MERGE", 5) && isspace((unsigned char)tail[5]));
 }
 static int ng_query_is_write(const char* p) {
+    if (ng_query_has_union(p))
+        return ng_cy_has_write_clause(p);
     if (ng_cy_has_with(p))
         return ng_cy_has_write_clause(p);
     if (!strncmp(p, "CREATE", 6) && isspace((unsigned char)p[6]))
@@ -7998,6 +8487,7 @@ static int ng_query_is_write(const char* p) {
     }
     return 0;
 }
+static ng_status ng_query_execute_union(ng_graph* g, const char* query, FILE* out, int* mutated);
 static ng_status ng_query_execute_impl(ng_graph* g, const char* q, FILE* out, int* mutated) {
     const char* p = ng_skip_ws(q);
     int handled = 0;
@@ -8006,6 +8496,8 @@ static ng_status ng_query_execute_impl(ng_graph* g, const char* q, FILE* out, in
         return NG_INVALID_ARGUMENT;
     if (mutated)
         *mutated = 0;
+    if (ng_query_has_union(p))
+        return ng_query_execute_union(g, p, out, mutated);
     ws = ng_query_execute_with(g, p, out, mutated, &handled);
     if (handled)
         return ws;
@@ -8028,6 +8520,140 @@ static ng_status ng_query_execute_impl(ng_graph* g, const char* q, FILE* out, in
         return ng_query_print_active(g, p, out);
     }
     return NG_PARSE_ERROR;
+}
+static int ng_query_union_token(const char* p) {
+    return !strncmp(p, "UNION", 5) && !ng_ident_char((unsigned char)p[-1]) &&
+           !ng_ident_char((unsigned char)p[5]);
+}
+static ng_status
+ng_query_split_union(const char* query, char** branches, size_t* branch_count, int* union_all) {
+    const char* start = query;
+    const char* p = query;
+    size_t count = 0;
+    int all = 0;
+    while (*p) {
+        if (*p == '"') {
+            p++;
+            while (*p && *p != '"')
+                p++;
+            if (!*p)
+                return NG_PARSE_ERROR;
+            p++;
+            continue;
+        }
+        if (p != query && ng_query_union_token(p)) {
+            const char* end = p;
+            const char* next = ng_skip_ws(p + 5);
+            size_t length;
+            if (count >= 8)
+                return NG_LIMIT;
+            while (end > start && isspace((unsigned char)end[-1]))
+                end--;
+            length = (size_t)(end - start);
+            branches[count] = (char*)malloc(length + 1);
+            if (!branches[count])
+                return NG_OOM;
+            memcpy(branches[count], start, length);
+            branches[count][length] = 0;
+            count++;
+            if (!strncmp(next, "ALL", 3) && !ng_ident_char((unsigned char)next[3])) {
+                all = 1;
+                next = ng_skip_ws(next + 3);
+            }
+            if (!*next)
+                return NG_PARSE_ERROR;
+            start = next;
+            p = next;
+            continue;
+        }
+        p++;
+    }
+    if (count >= 8)
+        return NG_LIMIT;
+    {
+        const char* end = p;
+        size_t length;
+        while (end > start && isspace((unsigned char)end[-1]))
+            end--;
+        length = (size_t)(end - start);
+        if (!length)
+            return NG_PARSE_ERROR;
+        branches[count] = (char*)malloc(length + 1);
+        if (!branches[count])
+            return NG_OOM;
+        memcpy(branches[count], start, length);
+        branches[count][length] = 0;
+        count++;
+    }
+    if (count < 2)
+        return NG_NOT_FOUND;
+    *branch_count = count;
+    *union_all = all;
+    return NG_OK;
+}
+static ng_status ng_query_execute_union(ng_graph* g, const char* query, FILE* out, int* mutated) {
+    char* branches[8] = {0};
+    size_t branch_count = 0, i;
+    int union_all = 0;
+    ng_status s = ng_query_split_union(query, branches, &branch_count, &union_all);
+    if (s != NG_OK)
+        return s == NG_NOT_FOUND ? NG_PARSE_ERROR : s;
+    if (mutated)
+        *mutated = 0;
+    for (i = 0; i < branch_count; i++) {
+        FILE* branch_output = tmpfile();
+        int branch_mutated = 0;
+        if (!branch_output) {
+            s = NG_IO_ERROR;
+            break;
+        }
+        s = ng_query_execute_impl(g, branches[i], branch_output, &branch_mutated);
+        if (s == NG_OK && branch_mutated)
+            s = NG_PARSE_ERROR;
+        if (s == NG_OK) {
+            char line[65536];
+            if (fflush(branch_output) != 0 || fseek(branch_output, 0, SEEK_SET) != 0)
+                s = NG_IO_ERROR;
+            while (s == NG_OK && fgets(line, sizeof(line), branch_output)) {
+                if (!union_all) {
+                    long position = ftell(out);
+                    char existing[65536];
+                    FILE* saved = tmpfile();
+                    int duplicate = 0;
+                    (void)position;
+                    if (!saved) {
+                        s = NG_IO_ERROR;
+                        break;
+                    }
+                    if (fseek(out, 0, SEEK_SET) == 0)
+                        while (fgets(existing, sizeof(existing), out))
+                            if (!strcmp(existing, line)) {
+                                duplicate = 1;
+                                break;
+                            }
+                    fclose(saved);
+                    if (fseek(out, 0, SEEK_END) != 0) {
+                        s = NG_IO_ERROR;
+                        break;
+                    }
+                    if (duplicate)
+                        continue;
+                }
+                if (fputs(line, out) == EOF) {
+                    s = NG_IO_ERROR;
+                    break;
+                }
+            }
+            if (s == NG_OK && ferror(branch_output))
+                s = NG_IO_ERROR;
+        }
+        fclose(branch_output);
+        if (s != NG_OK)
+            break;
+    }
+    for (i = 0; i < branch_count; i++)
+        free(branches[i]);
+    return s;
 }
 static ng_status ng_query_copy_output(FILE* src, FILE* dst) {
     char buf[4096];
@@ -9042,6 +9668,9 @@ static void ng_free_contents(ng_graph* g) {
     free(g->path);
     free(g->ao);
     free(g->ai);
+    for (i = 0; i < g->procedure_count; i++)
+        free(g->procedures[i].name);
+    free(g->procedures);
     memset(g, 0, sizeof(*g));
 }
 static int ng_clone_graph(const ng_graph* src, ng_graph* dst) {
@@ -9081,18 +9710,9 @@ static int ng_clone_graph(const ng_graph* src, ng_graph* dst) {
             if (!grow((void**)&n->p, &n->cap, n->np + 1, sizeof(*n->p)))
                 return 0;
             n->p[n->np] = src->no[i].p[j];
-            if (src->no[i].p[j].v.type == NG_VALUE_STRING) {
-                n->p[n->np].v.as.string = dupstr(src->no[i].p[j].v.as.string);
-                if (!n->p[n->np].v.as.string)
-                    return 0;
-            } else if (src->no[i].p[j].v.type == NG_VALUE_BYTES) {
-                n->p[n->np].v.as.bytes = (unsigned char*)malloc(n->p[n->np].v.length);
-                if (n->p[n->np].v.length && !n->p[n->np].v.as.bytes)
-                    return 0;
-                memcpy((void*)n->p[n->np].v.as.bytes,
-                       src->no[i].p[j].v.as.bytes,
-                       n->p[n->np].v.length);
-            }
+            memset(&n->p[n->np].v, 0, sizeof(n->p[n->np].v));
+            if (valcopy(&n->p[n->np].v, &src->no[i].p[j].v) != NG_OK)
+                return 0;
             n->np++;
         }
     }
@@ -9109,18 +9729,9 @@ static int ng_clone_graph(const ng_graph* src, ng_graph* dst) {
             if (!grow((void**)&r->p, &r->cap, r->np + 1, sizeof(*r->p)))
                 return 0;
             r->p[r->np] = src->re[i].p[j];
-            if (src->re[i].p[j].v.type == NG_VALUE_STRING) {
-                r->p[r->np].v.as.string = dupstr(src->re[i].p[j].v.as.string);
-                if (!r->p[r->np].v.as.string)
-                    return 0;
-            } else if (src->re[i].p[j].v.type == NG_VALUE_BYTES) {
-                r->p[r->np].v.as.bytes = (unsigned char*)malloc(r->p[r->np].v.length);
-                if (r->p[r->np].v.length && !r->p[r->np].v.as.bytes)
-                    return 0;
-                memcpy((void*)r->p[r->np].v.as.bytes,
-                       src->re[i].p[j].v.as.bytes,
-                       r->p[r->np].v.length);
-            }
+            memset(&r->p[r->np].v, 0, sizeof(r->p[r->np].v));
+            if (valcopy(&r->p[r->np].v, &src->re[i].p[j].v) != NG_OK)
+                return 0;
             r->np++;
         }
     }
@@ -9137,6 +9748,18 @@ static int ng_clone_graph(const ng_graph* src, ng_graph* dst) {
             return 0;
         memcpy(dst->ix, src->ix, src->nix * sizeof(*dst->ix));
         dst->nix = dst->cix = src->nix;
+    }
+    for (i = 0; i < src->procedure_count; i++) {
+        if (!grow((void**)&dst->procedures,
+                  &dst->procedure_capacity,
+                  dst->procedure_count + 1,
+                  sizeof(*dst->procedures)))
+            return 0;
+        dst->procedures[dst->procedure_count] = src->procedures[i];
+        dst->procedures[dst->procedure_count].name = dupstr(src->procedures[i].name);
+        if (!dst->procedures[dst->procedure_count].name)
+            return 0;
+        dst->procedure_count++;
     }
     return 1;
 }
