@@ -3,16 +3,17 @@
 #include <stdio.h>
 #include <string.h>
 
-#define NG_CHECK(expr) do { \
-    status = (expr); \
-    if (status != NG_OK) { \
-        fprintf(stderr, "%s\n", ng_status_name(status)); \
-        goto fail; \
-    } \
-} while (0)
+#define NG_CHECK(expr)                                                                             \
+    do {                                                                                           \
+        status = (expr);                                                                           \
+        if (status != NG_OK) {                                                                     \
+            fprintf(stderr, "%s\n", ng_status_name(status));                                       \
+            goto fail;                                                                             \
+        }                                                                                          \
+    } while (0)
 
 int main(void) {
-    ng_graph *g = 0;
+    ng_graph* g = 0;
     ng_status status = NG_OK;
     ng_symbol_id person = 0;
     ng_symbol_id knows = 0;
