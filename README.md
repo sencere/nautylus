@@ -276,7 +276,7 @@ Heavier algorithms such as Dijkstra/A*, Louvain/Leiden, KNN, embeddings, max flo
 
 ## MiniCypher Subset
 
-The current query parser intentionally supports a practical subset of Cypher, not full Neo4j Cypher. Supported read patterns include node matches, multi-hop relationship matches, multi-node paths, `WHERE`, `WITH`, `OPTIONAL MATCH`, aggregation, `ORDER BY`, `SKIP`, and `LIMIT`:
+The current query parser intentionally supports a practical subset of Cypher, not full Neo4j Cypher. Supported read patterns include node matches, multi-hop relationship matches, multi-node paths, `WHERE`, `WITH`, `UNWIND`, `OPTIONAL MATCH`, aggregation, `ORDER BY`, `SKIP`, and `LIMIT`:
 
 ```text
 MATCH (n) RETURN n
@@ -293,13 +293,14 @@ MATCH (n)-[:TYPE]->(m) RETURN n.key, m.key
 MATCH (n:Label)-[:TYPE]->(m:Label) WHERE m.key = "value" RETURN n LIMIT 10
 MATCH (a:Person) WITH a MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name
 MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name
+UNWIND [1, 2, 3] AS value RETURN value
 MATCH (a:Person) RETURN a.city, count(a) AS people ORDER BY people DESC
 MATCH (a:Person) CALL randomWalk(a, 5, 42) YIELD node RETURN node
 ```
 
 `CALL randomWalk(start, steps[, seed]) YIELD node` expands each incoming row into one row per visited node, including the start node. The Cypher adapter currently uses outgoing relationships and all relationship types; the typed C API provides direction and relationship-type filters.
 
-Supported scalar values are strings, integers, doubles, booleans, `null`, and lists produced by `collect(...)`. Predicate support includes `=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `IS NULL`, `IS NOT NULL`, `AND`, `OR`, `NOT`, and parentheses. Relationship reads support `->`, `<-`, and undirected `-[]-` patterns. Exact or bounded hop counts from 1 to 64 are supported in read relationship patterns, such as `*2` or `*1..3`.
+Supported scalar values are strings, integers, doubles, booleans, `null`, and lists produced by list literals, list-valued parameters, graph properties, or `collect(...)`. `UNWIND <list-expression> AS variable` expands one input row per list item; empty and null lists produce no rows. Predicate support includes `=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `IS NULL`, `IS NOT NULL`, `AND`, `OR`, `NOT`, and parentheses. Relationship reads support `->`, `<-`, and undirected `-[]-` patterns. Exact or bounded hop counts from 1 to 64 are supported in read relationship patterns, such as `*2` or `*1..3`.
 
 Projection support includes variables, IDs, property access, literals, parameters, simple arithmetic, aliases with `AS`, `DISTINCT`, and tab-separated multi-column output. `ORDER BY` works after `WITH` and final `RETURN`, supports multiple keys and `ASC`/`DESC`, and executes after projection/aggregation and `DISTINCT`, before `SKIP`/`LIMIT`. Null ordering is deterministic: nulls sort last for ascending order and first for descending order.
 
@@ -321,10 +322,14 @@ CREATE (a:Person {name: "Anton"})-[:KNOWS]->(b:Person {name: "Stan"})
 CREATE (a:Person {name: "A"}), (b:Person {name: "B"})
 MATCH (a:Person) WHERE a.name = "A" SET a.city = "Berlin", a.score = 10
 MATCH (a:Person)-[r:KNOWS]->(b:Person) DELETE r, b
+MATCH (a:Person) REMOVE a.name, a:Person
+MATCH (a:Person) DETACH DELETE a
+MATCH (a:Person) SET a += {city: "Berlin", score: 10}
+MATCH (a:Person) SET a = {name: "Replacement"}
 MERGE (a:Person {name: "A"}), (b:Person {name: "B"}), (a)-[:KNOWS]->(b)
 ```
 
-`CREATE` supports single connected patterns and comma-separated pattern lists. `MERGE` supports node patterns, relationship patterns, comma-separated pattern lists, forward/reverse relationships, properties, and variable binding across patterns. Unconstrained new MERGE nodes without a label or property map are rejected. `SET` supports comma-separated property assignments with scalar expressions on the right-hand side. `DELETE` supports comma-separated node and relationship variables.
+`CREATE` and `MERGE` support single connected patterns and comma-separated pattern lists. Their node and relationship property maps accept scalar expressions evaluated against the current row, including parameters, variables, property access, and arithmetic. `MERGE` reuses the evaluated properties for both lookup and creation. Unconstrained new MERGE nodes without a label or property map are rejected. `SET` supports comma-separated property assignments with scalar expressions on the right-hand side, `SET n += {key: value}` map merges, and `SET n = {key: value}` map replacement. Null map values remove properties. `REMOVE` supports comma-separated property removal and node-label removal. `DELETE` and `DETACH DELETE` support comma-separated node and relationship variables; node deletion removes incident relationships before deleting the node.
 
 Parameterized execution is available through the C API:
 
@@ -348,8 +353,8 @@ Important MiniCypher limitations:
 * `ORDER BY` uses strict post-projection scope for `WITH`; hidden projection visibility is not implemented.
 * Lists and complex values are printed and compared for equality, but are not meaningfully ordered.
 * Variable-length relationship patterns are supported in read `MATCH`, but not in `CREATE`/`MERGE` write patterns.
-* Richer `SET` forms such as map replacement/merge are not implemented.
-* `ON CREATE`, `ON MATCH`, `REMOVE`, `DETACH DELETE`, `UNWIND`, subqueries, path values, and procedure calls are not implemented.
+* `ON CREATE`, `ON MATCH`, subqueries, path values, and general user-defined procedure calls are not implemented. The built-in `randomWalk` procedure is supported as documented above.
+* `UNWIND` currently expands scalar list literals, list-valued parameters, and list-valued properties.
 
 Example:
 
@@ -374,7 +379,7 @@ Start the local web interface:
 
 Open `http://127.0.0.1:6180`. The workbench serves static assets from `resources/web` and `resources/logo`, and operates on the database path passed to `serve`.
 
-The current workbench supports stats, MiniCypher query/explain, triple TSV import, sample graph creation, required/unique node-property constraints, exact-match index metadata, interactive graph rendering, a top query input, and a right-side node information panel with editable colors.
+The current workbench supports stats, MiniCypher query/explain, triple TSV import, sample graph creation, required/unique node-property constraints, exact-match index metadata, interactive graph rendering, a top query input, and a right-side node information panel with editable colors and typed node/relationship properties.
 
 ## File Formats
 
@@ -520,7 +525,7 @@ Capability summary:
 | --- | --- | --- |
 | Core graph | CRUD, labels, typed properties, property deletion, directed relationships, validation | Incremental adjacency maintenance |
 | Persistence | Single-file snapshots, checksum, strict load checks, atomic replacement where supported | Generations, per-section checksums, directory fsync, migrations |
-| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `OPTIONAL MATCH`, parameters, aggregation, `ORDER BY`, rollback-protected `CREATE`/`MERGE`/`SET`/`DELETE` | Full Cypher compatibility, richer write forms, path values, subqueries |
+| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `OPTIONAL MATCH`, parameters, aggregation, `ORDER BY`, `SKIP`/`LIMIT`, rollback-protected `CREATE`/`MERGE`/`SET`/`DELETE`, seeded `randomWalk` procedure | Full Cypher compatibility, richer write forms, general procedures, path values, subqueries |
 | Analytics | Degree centrality, PageRank, weak/strong components, triangle count, local clustering coefficient, common-neighbor style link prediction, topological sort, seeded random walks | Weighted paths, community detection, KNN/similarity, embeddings, max flow, scalable algorithm implementations |
 | Import/export | Triple TSV/CSV, property-graph TSV, CLI workflows, rollback on import failure | Stronger two-file crash recovery, richer CLI flags |
 | Release quality | Strict C99 tests, ASan/UBSan run with LeakSanitizer disabled in this environment, documented tested limits, small local performance baseline, local web workbench smoke coverage | CI, fuzzing, profiling |

@@ -12,10 +12,11 @@ The project builds, tests, and produces a working `nautylus` CLI plus an embedda
 | Graph representation | Directed relationships, labels, typed properties, enumeration, bounded breadth-first traversal, validation, incident-edge cleanup, rebuilt adjacency cache | Incremental adjacency maintenance, depth-first traversal ordering |
 | Import/export | Triple TSV/CSV, property-graph TSV, typed values, duplicate suppression, diagnostics, import rollback, deterministic export ordering, CLI workflows, `.nautylusbak` export guards | Stronger two-file crash recovery, more CLI flags |
 | Persistence | Portable single-file snapshots, little-endian encoding, versioned header, checksum, persisted node-property constraints, temporary-file write, pre-save validation, strict load checks | Per-section checksums, generation metadata, migrations, stronger durability semantics |
-| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, MiniCypher node matches, bounded directed relationship matches, ID predicates, property and multi-column projection, `EXPLAIN` text | Aggregation, mutation queries |
+| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `UNWIND`, `OPTIONAL MATCH`, parameters, aggregates, `ORDER BY`, `SKIP`/`LIMIT`, rollback-protected `CREATE`/`MERGE`/`SET`/`REMOVE`/`DELETE`/`DETACH DELETE`, map-based `SET`, seeded `randomWalk` procedure, `EXPLAIN` text | Full Cypher compatibility, richer map expressions, general procedures, path values, subqueries |
 | Transactions/indexes | Public in-memory transaction API, commit, rollback, persistent index metadata, snapshot node index rebuilding | Multi-process conflicts, durable transaction journal, materialized persistent indexes |
 | Release quality | Strict C99 tests, CLI regression coverage, documented tested limits, small local performance baseline, ASan/UBSan run with LeakSanitizer disabled in this environment | CI, fuzzing, profiling |
-| Web/server | Local POSIX HTTP workbench for stats, query/explain, triple import, sample data, constraints, and index metadata | Broader API, graph visualization, non-POSIX support |
+| Web/server | Local POSIX HTTP workbench for stats, query/explain, triple import, sample data, constraints, index metadata, interactive graph rendering, node/relationship inspection, typed node properties, and label color editing | Broader API, non-POSIX support |
+| Analytics | Degree centrality, PageRank, weak/strong components, triangle count, local clustering coefficient, common-neighbor link prediction basics, topological sort, seeded random walks | Weighted paths, community detection, KNN/similarity, embeddings, max flow, scalable implementations |
 
 ## Current CLI
 
@@ -82,6 +83,11 @@ Regression coverage includes:
 * property-aware node creation with required/unique constraint preflight;
 * property-mutation constraint enforcement;
 * MiniCypher node and bounded relationship query parsing and execution;
+* MiniCypher `CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` writes with transaction rollback;
+* map-based `SET +=` merge and `SET =` replacement with null-removal semantics;
+* `WITH`, `UNWIND`, `OPTIONAL MATCH`, parameters, aggregates, ordering, `SKIP`, and `LIMIT`;
+* comma-separated `CREATE` and `MERGE` pattern lists;
+* seeded C API and Cypher random walks;
 * MiniCypher explain output;
 * label checks;
 * relationship enumeration;
@@ -100,6 +106,7 @@ Regression coverage includes:
 * CLI property-graph import/export/validate/stats;
 * CLI benchmark smoke path;
 * local web workbench build coverage;
+* graph rendering and inspector property propagation;
 * sorted label/property views;
 * backup-file export guards;
 * ordering-buffer allocation failure;
@@ -111,6 +118,7 @@ Near-term:
 
 1. Add platform-specific export rename failure tests.
 2. Expand malformed-record and constraint edge-case coverage.
+3. Broaden map expressions and procedure support, then evaluate `UNION` and richer list expressions.
 
 Larger product directions:
 

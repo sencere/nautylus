@@ -282,7 +282,38 @@ MATCH (n)-[:TYPE]->(m) RETURN n.key, m.key
 MATCH (n:Label)-[:TYPE]->(m:Label) WHERE m.key = "value" RETURN n LIMIT 10
 ```
 
-Relationship patterns are directed. The relationship type is optional, and bounded hop counts from 1 to 64 are supported with `*N` or `*N..M`. `ng_query_nodes()` returns matching node IDs for single node-ID returns. `ng_query_print()` also supports `RETURN n.id`, `RETURN m.id`, node-property projections such as `RETURN n.name`, and tab-separated multi-column projection rows. Relationship variables, relationship properties, unbounded paths, mutation queries, and aggregation are not supported.
+Relationship patterns are directed by default, with `->`, `<-`, and undirected reads supported in the generic pipeline. Bounded hop counts from 1 to 64 are supported with `*N` or `*N..M`. `ng_query_nodes()` returns matching node IDs for single node-ID returns. `ng_query_print()` also supports `RETURN n.id`, `RETURN m.id`, node-property projections such as `RETURN n.name`, and tab-separated multi-column projection rows. The broader execution API supports relationship variables/properties, `WITH`, `UNWIND`, `OPTIONAL MATCH`, parameters, writes, aggregation, `ORDER BY`, `SKIP`, and `LIMIT`.
+
+The write-capable API is exposed through `ng_query_execute()` and `ng_query_execute_params()`. Writes are executed transactionally: if parsing, execution, property validation, output, or commit fails, the graph is rolled back. The current write subset includes comma-separated `CREATE` and `MERGE` patterns, scalar-property and map-based `SET`, `REMOVE` property/label targets, and comma-separated node/relationship `DELETE` and `DETACH DELETE` targets. CREATE and MERGE property-map values may be row-dependent scalar expressions, such as `MERGE (n:Value {value: x + 1})` after `UNWIND ... AS x`; MERGE evaluates the same values for lookup and creation. `SET n += {key: value}` merges entries, while `SET n = {key: value}` replaces the property set. Null map values remove properties. Node deletion removes incident relationships before removing the node.
+
+Named parameters use `ng_parameter` values and are bound through `ng_query_execute_params()` or `ng_query_print_params()` without textual substitution:
+
+```c
+ng_parameter parameter = { "name", { NG_VALUE_STRING, 5, { .string = "Anton" } } };
+int mutated = 0;
+ng_query_execute_params(g,
+    "MATCH (a:Person) WHERE a.name = $name RETURN a",
+    &parameter, 1, stdout, &mutated);
+```
+
+Supported parameter values are the existing `ng_value` types, including null and `NG_VALUE_LIST`. Missing parameters return `NG_NOT_FOUND`; extra parameters are ignored. `UNWIND $items AS item` expands list-valued parameters without textual query substitution.
+
+The supported procedure-style query is a seeded random walk:
+
+```text
+MATCH (a) CALL randomWalk(a, 5, 42) YIELD node RETURN node
+```
+
+It includes the start node and emits one row per visited node. The Cypher form uses outgoing relationships and all relationship types. The typed C API exposes direction and relationship-type filtering:
+
+```c
+ng_random_walk_options options = {
+    NG_DIRECTION_EITHER, relationship_type, 100, 42
+};
+ng_node_id path[101];
+size_t path_count = 0;
+ng_random_walk(g, start, &options, path, 101, &path_count);
+```
 
 Supported predicate literals:
 
@@ -294,4 +325,8 @@ Supported predicate literals:
 
 `ng_query_explain()` parses the same subset and writes a short textual plan into a caller-provided buffer.
 
-Unsupported syntax returns `NG_PARSE_ERROR`.
+Unsupported syntax returns `NG_PARSE_ERROR`. General user-defined procedure calls, path values, subqueries, and full Cypher compatibility are not implemented.
+
+## Analytics
+
+The dependency-free analytics API currently includes degree centrality, PageRank, weakly and strongly connected components, triangle count, local clustering coefficient, common neighbors, preferential attachment, total neighbors, topological sort, and seeded random walks. Analytics operate on the in-memory graph and write into caller-owned buffers. A small output buffer returns `NG_LIMIT` and reports the required count where the API provides an output-count pointer. Heavy weighted-path, community, similarity, embedding, and flow algorithms remain future work.

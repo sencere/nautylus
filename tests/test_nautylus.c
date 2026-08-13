@@ -569,5 +569,98 @@ int main(void) {
         assert(ng_query_execute(rw, "MATCH (a) CALL randomWalk(a) YIELD node RETURN node", qout, &mutated) == NG_PARSE_ERROR);
         fclose(qout); ng_close(rw); remove("random-walk.ng");
     }
+    {
+        FILE *ef;
+        remove("remove.ng");
+        assert(system(NAUTYLUS_CLI " create remove.ng > remove-create.out") == 0);
+        assert(system(NAUTYLUS_CLI " query remove.ng 'CREATE (n:Person {name: \"A\", age: 30})' > remove-seed.out") == 0);
+        assert(system(NAUTYLUS_CLI " query remove.ng 'MATCH (n:Person) REMOVE n.name, n:Person' > remove.out") == 0);
+        assert(system(NAUTYLUS_CLI " search remove.ng 'MATCH (n) RETURN n.name' > remove-absent.out") == 0);
+        ef = fopen("remove-absent.expected", "wb"); assert(ef); fputs("null\n", ef); assert(fclose(ef) == 0);
+        assert(same_file("remove-absent.out", "remove-absent.expected"));
+        assert(system(NAUTYLUS_CLI " query remove.ng 'MATCH (n) REMOVE n.missing' > remove-missing.out") == 0);
+        assert(system(NAUTYLUS_CLI " query remove.ng 'MATCH (n) REMOVE n.age, missing.value' > remove-rollback.out 2> remove-rollback.err") != 0);
+        assert(system(NAUTYLUS_CLI " search remove.ng 'MATCH (n) RETURN n.age' > remove-rollback-check.out") == 0);
+        ef = fopen("remove-rollback-check.expected", "wb"); assert(ef); fputs("30\n", ef); assert(fclose(ef) == 0);
+        assert(same_file("remove-rollback-check.out", "remove-rollback-check.expected"));
+        remove("remove.ng"); remove("remove-create.out"); remove("remove-seed.out"); remove("remove.out");
+        remove("remove-absent.out"); remove("remove-absent.expected"); remove("remove-missing.out");
+        remove("remove-rollback.out"); remove("remove-rollback.err"); remove("remove-rollback-check.out"); remove("remove-rollback-check.expected");
+        remove("detach.ng");
+        assert(system(NAUTYLUS_CLI " create detach.ng > detach-create.out") == 0);
+        assert(system(NAUTYLUS_CLI " query detach.ng 'CREATE (a:Person {name: \"A\"})-[:KNOWS]->(b:Person {name: \"B\"})' > detach-seed.out") == 0);
+        assert(system(NAUTYLUS_CLI " query detach.ng 'MATCH (a:Person {name: \"A\"}) DETACH DELETE a' > detach.out") == 0);
+        assert(system(NAUTYLUS_CLI " stats detach.ng > detach-stats.out") == 0);
+        ef = fopen("detach-stats.expected", "wb"); assert(ef); fputs("nodes: 1\nrelationships: 0\nsymbols: 3\n", ef); assert(fclose(ef) == 0);
+        assert(same_file("detach-stats.out", "detach-stats.expected"));
+        assert(system(NAUTYLUS_CLI " query detach.ng 'MATCH (b:Person) DETACH DELETE b, missing' > detach-rollback.out 2> detach-rollback.err") != 0);
+        assert(system(NAUTYLUS_CLI " stats detach.ng > detach-rollback-stats.out") == 0);
+        assert(same_file("detach-rollback-stats.out", "detach-stats.expected"));
+        remove("detach.ng"); remove("detach-create.out"); remove("detach-seed.out"); remove("detach.out");
+        remove("detach-stats.out"); remove("detach-stats.expected"); remove("detach-rollback.out"); remove("detach-rollback.err"); remove("detach-rollback-stats.out");
+    }
+    {
+        FILE *ef;
+        remove("mapset.ng");
+        assert(system(NAUTYLUS_CLI " create mapset.ng > mapset-create.out") == 0);
+        assert(system(NAUTYLUS_CLI " query mapset.ng 'CREATE (n:Person {name: \"A\", age: 30})-[:KNOWS {since: 2020}]->(m:Person)' > mapset-seed.out") == 0);
+        assert(system(NAUTYLUS_CLI " query mapset.ng 'MATCH (n:Person {name: \"A\"}) SET n += {city: \"Berlin\", age: 31} RETURN n.name, n.age, n.city' > mapset-merge.out") == 0);
+        ef = fopen("mapset-merge.expected", "wb"); assert(ef); fputs("A\t31\tBerlin\n", ef); assert(fclose(ef) == 0);
+        assert(same_file("mapset-merge.out", "mapset-merge.expected"));
+        assert(system(NAUTYLUS_CLI " query mapset.ng 'MATCH (n:Person {name: \"A\"}) SET n = {name: \"B\", code: \"...\"} RETURN n.name, n.age, n.city, n.code' > mapset-replace.out") == 0);
+        ef = fopen("mapset-replace.expected", "wb"); assert(ef); fputs("B\tnull\tnull\t...\n", ef); assert(fclose(ef) == 0);
+        assert(same_file("mapset-replace.out", "mapset-replace.expected"));
+        assert(system(NAUTYLUS_CLI " query mapset.ng 'MATCH (n:Person {name: \"B\"}) SET n += {name: null} RETURN n.name' > mapset-null.out") == 0);
+        ef = fopen("mapset-null.expected", "wb"); assert(ef); fputs("null\n", ef); assert(fclose(ef) == 0);
+        assert(same_file("mapset-null.out", "mapset-null.expected"));
+        assert(system(NAUTYLUS_CLI " query mapset.ng 'MATCH (n:Person) SET n += {}' > mapset-empty.out") == 0);
+        assert(system(NAUTYLUS_CLI " query mapset.ng 'MATCH (n:Person {name: \"B\"}) SET n += {city: \"Paris\"}, missing.value = 1' > mapset-rollback.out 2> mapset-rollback.err") != 0);
+        assert(system(NAUTYLUS_CLI " search mapset.ng 'MATCH (n:Person) RETURN n.city' > mapset-rollback-check.out") == 0);
+        ef = fopen("mapset-rollback-check.expected", "wb"); assert(ef); fputs("null\nnull\n", ef); assert(fclose(ef) == 0);
+        assert(same_file("mapset-rollback-check.out", "mapset-rollback-check.expected"));
+        assert(system(NAUTYLUS_CLI " query mapset.ng 'MATCH (a:Person)-[r:KNOWS]->(b:Person) SET r += {since: 2024, weight: 1.5} RETURN r.since, r.weight' > mapset-rel.out") == 0);
+        ef = fopen("mapset-rel.expected", "wb"); assert(ef); fputs("2024\t1.5\n", ef); assert(fclose(ef) == 0);
+        assert(same_file("mapset-rel.out", "mapset-rel.expected"));
+        remove("mapset.ng"); remove("mapset-create.out"); remove("mapset-seed.out"); remove("mapset-merge.out"); remove("mapset-merge.expected");
+        remove("mapset-replace.out"); remove("mapset-replace.expected"); remove("mapset-null.out"); remove("mapset-null.expected"); remove("mapset-empty.out");
+        remove("mapset-rollback.out"); remove("mapset-rollback.err"); remove("mapset-rollback-check.out"); remove("mapset-rollback-check.expected"); remove("mapset-rel.out"); remove("mapset-rel.expected");
+    }
+    /* Core UNWIND and MERGE-map cases adapted from cypher/openCypher/tck/features/clauses/unwind/Unwind1.feature and merge scenarios. */
+    {
+        ng_value items[3]; ng_value_list list; ng_parameter param; FILE *f; int mutated=99; size_t before;
+        assert(ng_create(&g,"unwind.ng")==NG_OK);
+        assert(query_params_file(g,"UNWIND [1, 2, 3] AS x RETURN x",NULL,0,"unwind.out",&mutated)==NG_OK);
+        f=fopen("unwind.expected","wb"); assert(f); fputs("1\n2\n3\n",f); assert(fclose(f)==0); assert(same_file("unwind.out","unwind.expected"));
+        assert(query_params_file(g,"UNWIND [] AS x RETURN x",NULL,0,"unwind.out",&mutated)==NG_OK);
+        f=fopen("unwind.expected","wb"); assert(f); assert(fclose(f)==0); assert(same_file("unwind.out","unwind.expected"));
+        assert(query_params_file(g,"UNWIND null AS x RETURN x",NULL,0,"unwind.out",&mutated)==NG_OK); assert(same_file("unwind.out","unwind.expected"));
+        assert(query_params_file(g,"UNWIND [1, 2] AS x WITH x RETURN x + 10",NULL,0,"unwind.out",&mutated)==NG_OK);
+        f=fopen("unwind.expected","wb"); assert(f); fputs("11\n12\n",f); assert(fclose(f)==0); assert(same_file("unwind.out","unwind.expected"));
+        assert(query_params_file(g,"UNWIND [1, 2] AS x CREATE (n:Value) SET n.value = x RETURN n.value",NULL,0,"unwind.out",&mutated)==NG_OK&&mutated);
+        f=fopen("unwind.expected","wb"); assert(f); fputs("1\n2\n",f); assert(fclose(f)==0); assert(same_file("unwind.out","unwind.expected"));
+        assert(query_params_file(g,"UNWIND [2, 3] AS x CREATE (n:Computed {value: x + 10, doubled: x * 2}) RETURN n.value, n.doubled",NULL,0,"unwind.out",&mutated)==NG_OK&&mutated);
+        f=fopen("unwind.expected","wb"); assert(f); fputs("12\t4\n13\t6\n",f); assert(fclose(f)==0); assert(same_file("unwind.out","unwind.expected"));
+        assert(query_params_file(g,"UNWIND [1, 2] AS x CREATE (a:Computed {value: x})-[r:LINK {weight: x + 1}]->(b:Computed {value: x * 2}) RETURN a.value, r.weight, b.value",NULL,0,"unwind.out",&mutated)==NG_OK&&mutated);
+        f=fopen("unwind.expected","wb"); assert(f); fputs("1\t2\t2\n2\t3\t4\n",f); assert(fclose(f)==0); assert(same_file("unwind.out","unwind.expected"));
+        assert(query_params_file(g,"UNWIND [2, 3] AS x MERGE (n:MergeComputed {value: x + 10}) RETURN n.value",NULL,0,"unwind.out",&mutated)==NG_OK&&mutated);
+        f=fopen("unwind.expected","wb"); assert(f); fputs("12\n13\n",f); assert(fclose(f)==0); assert(same_file("unwind.out","unwind.expected"));
+        assert(query_params_file(g,"UNWIND [1, 2] AS x MERGE (a:MergeComputed {value: x})-[r:MERGE_LINK {weight: x + 1}]->(b:MergeComputed {value: x * 2}) RETURN a.value, r.weight, b.value",NULL,0,"unwind.out",&mutated)==NG_OK&&mutated);
+        f=fopen("unwind.expected","wb"); assert(f); fputs("1\t2\t2\n2\t3\t4\n",f); assert(fclose(f)==0); assert(same_file("unwind.out","unwind.expected"));
+        assert(query_tmp(g,"CREATE (source:MergeSource {score: 40})",&mutated)==NG_OK);
+        param.name="offset"; param.value.type=NG_VALUE_INT64; param.value.length=0; param.value.as.integer=5;
+        assert(query_params_file(g,"MATCH (source:MergeSource) UNWIND [1, 2] AS x MERGE (n:MergeParam {value: source.score + x + $offset}) RETURN n.value",&param,1,"unwind.out",&mutated)==NG_OK&&mutated);
+        f=fopen("unwind.expected","wb"); assert(f); fputs("46\n47\n",f); assert(fclose(f)==0); assert(same_file("unwind.out","unwind.expected"));
+        memset(items,0,sizeof(items)); items[0].type=NG_VALUE_INT64; items[0].as.integer=4; items[1].type=NG_VALUE_INT64; items[1].as.integer=5; items[2].type=NG_VALUE_INT64; items[2].as.integer=6; list.count=3; list.items=items; param.name="items"; param.value.type=NG_VALUE_LIST; param.value.length=3; param.value.as.list=&list;
+        assert(query_params_file(g,"UNWIND $items AS x RETURN x",&param,1,"unwind.out",&mutated)==NG_OK);
+        f=fopen("unwind.expected","wb"); assert(f); fputs("4\n5\n6\n",f); assert(fclose(f)==0); assert(same_file("unwind.out","unwind.expected"));
+        assert(query_params_file(g,"UNWIND [1, 2] AS x MATCH (n:Value) RETURN x, n.value",NULL,0,"unwind.out",&mutated)==NG_OK);
+        f=fopen("unwind.expected","wb"); assert(f); fputs("1\t1\n1\t2\n2\t1\n2\t2\n",f); assert(fclose(f)==0); assert(same_file("unwind.out","unwind.expected"));
+        assert(query_tmp(g,"UNWIND [1,] AS x RETURN x",&mutated)==NG_PARSE_ERROR); assert(query_tmp(g,"UNWIND missing AS x RETURN x",&mutated)==NG_PARSE_ERROR); assert(query_tmp(g,"UNWIND $missing AS x RETURN x",&mutated)==NG_NOT_FOUND);
+        before=ng_node_count(g); mutated=99; assert(query_tmp(g,"UNWIND [7, 8] AS x CREATE (n:Rollback {value: x + 1}) SET missing.value = 1 RETURN n",&mutated)==NG_PARSE_ERROR); assert(!mutated&&ng_node_count(g)==before&&ng_validate(g)==NG_OK);
+        before=ng_node_count(g); mutated=99; assert(query_tmp(g,"UNWIND [7, 8] AS x MERGE (n:RollbackMerge {value: x + 1}) SET missing.value = 1 RETURN n",&mutated)==NG_PARSE_ERROR); assert(!mutated&&ng_node_count(g)==before&&ng_validate(g)==NG_OK);
+        param.name="offset"; param.value.type=NG_VALUE_INT64; param.value.length=0; param.value.as.integer=5;
+        before=ng_node_count(g); mutated=99; assert(query_tmp_params(g,"UNWIND [9] AS x MERGE (n:RollbackParam {value: x + $offset}) SET missing.value = 1 RETURN n",&param,1,&mutated)==NG_PARSE_ERROR); assert(!mutated&&ng_node_count(g)==before&&ng_validate(g)==NG_OK);
+        ng_close(g); remove("unwind.ng"); remove("unwind.out"); remove("unwind.expected");
+    }
     remove_import_files(); remove("test.ng"); puts("ok"); return 0;
 }
