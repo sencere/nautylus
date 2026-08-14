@@ -79,6 +79,25 @@ static int match_count_cb(ng_node_id n, void* ctx) {
     (*(size_t*)ctx)++;
     return 1;
 }
+typedef struct {
+    size_t count;
+    size_t length;
+    ng_node_id first, last;
+} path_context;
+static int path_count_cb(const ng_node_id* path, size_t length, void* ctx) {
+    path_context* context = (path_context*)ctx;
+    context->count++;
+    context->length = length;
+    context->first = path[0];
+    context->last = path[length - 1];
+    return 1;
+}
+static double zero_heuristic(ng_node_id node, ng_node_id target, void* context) {
+    (void)node;
+    (void)target;
+    (void)context;
+    return 0.0;
+}
 static double absd(double x) {
     return x < 0.0 ? -x : x;
 }
@@ -275,6 +294,172 @@ int main(void) {
         fclose(procedure_output);
     }
     {
+        FILE* list_output = tmpfile();
+        int list_mutated = 0;
+        char list_text[256] = {0};
+        assert(list_output);
+        assert(ng_query_execute(
+                   r,
+                   "WITH [1, 2, 3] AS xs RETURN xs[1], xs[-1], xs[1..3], size(xs), "
+                   "head(xs), tail(xs), reverse(xs), xs + [4]",
+                   list_output,
+                   &list_mutated) == NG_OK);
+        assert(!list_mutated && fseek(list_output, 0, SEEK_SET) == 0);
+        assert(fread(list_text, 1, sizeof(list_text) - 1, list_output) > 0);
+        assert(!strcmp(list_text,
+                       "2\t3\t[2, 3]\t3\t1\t[2, 3]\t[3, 2, 1]\t[1, 2, 3, 4]\n"));
+        fclose(list_output);
+    }
+    {
+        FILE* scalar_output = tmpfile();
+        int scalar_mutated = 0;
+        char scalar_text[256] = {0};
+        assert(scalar_output);
+        assert(ng_query_execute(
+                   r,
+                   "WITH [1, 2, 3] AS xs RETURN toString(xs), size(\"abc\"), "
+                   "coalesce(null, \"fallback\"), coalesce(null, xs[0])",
+                   scalar_output,
+                   &scalar_mutated) == NG_OK);
+        assert(!scalar_mutated && fseek(scalar_output, 0, SEEK_SET) == 0);
+        assert(fread(scalar_text, 1, sizeof(scalar_text) - 1, scalar_output) > 0);
+        assert(!strcmp(scalar_text, "[1, 2, 3]\t3\tfallback\t1\n"));
+        fclose(scalar_output);
+    }
+    {
+        FILE* function_output = tmpfile();
+        int function_mutated = 0;
+        char function_text[128] = {0};
+        assert(function_output);
+        assert(ng_query_execute(
+                   r,
+                   "WITH 1 AS seed RETURN toLower(\" HeLLo \"), toUpper(\"hello\"), trim(\"  x  \"), "
+                   "abs(-4), abs(1.5), toLower(null)",
+                   function_output,
+                   &function_mutated) == NG_OK);
+        assert(!function_mutated && fseek(function_output, 0, SEEK_SET) == 0);
+        assert(fread(function_text, 1, sizeof(function_text) - 1, function_output) > 0);
+        assert(!strcmp(function_text, " hello \tHELLO\tx\t4\t1.5\tnull\n"));
+        fclose(function_output);
+    }
+    {
+        FILE* comprehension_output = tmpfile();
+        int comprehension_mutated = 0;
+        char comprehension_text[128] = {0};
+        assert(comprehension_output);
+        assert(ng_query_execute(
+                   r,
+                   "WITH [1, 2, 3] AS xs RETURN [x IN xs WHERE x > 1 | x * 2]",
+                   comprehension_output,
+                   &comprehension_mutated) == NG_OK);
+        assert(!comprehension_mutated && fseek(comprehension_output, 0, SEEK_SET) == 0);
+        assert(fread(comprehension_text, 1, sizeof(comprehension_text) - 1, comprehension_output) > 0);
+        assert(!strcmp(comprehension_text, "[4, 6]\n"));
+        fclose(comprehension_output);
+    }
+    {
+        FILE* case_output = tmpfile();
+        int case_mutated = 0;
+        char case_text[128] = {0};
+        assert(case_output);
+        assert(ng_query_execute(
+                   r,
+                   "WITH 7 AS score RETURN CASE WHEN score >= 10 THEN \"high\" "
+                   "WHEN score >= 5 THEN \"medium\" ELSE \"low\" END",
+                   case_output,
+                   &case_mutated) == NG_OK);
+        assert(!case_mutated && fseek(case_output, 0, SEEK_SET) == 0);
+        assert(fread(case_text, 1, sizeof(case_text) - 1, case_output) > 0);
+        assert(!strcmp(case_text, "medium\n"));
+        fclose(case_output);
+        case_output = tmpfile();
+        memset(case_text, 0, sizeof(case_text));
+        assert(case_output);
+        case_mutated = 0;
+        assert(ng_query_execute(
+                   r,
+                   "WITH 2 AS score RETURN CASE score WHEN 1 THEN \"low\" "
+                   "WHEN 2 THEN \"medium\" ELSE \"high\" END",
+                   case_output,
+                   &case_mutated) == NG_OK);
+        assert(!case_mutated && fseek(case_output, 0, SEEK_SET) == 0);
+        assert(fread(case_text, 1, sizeof(case_text) - 1, case_output) > 0);
+        assert(!strcmp(case_text, "medium\n"));
+        fclose(case_output);
+    }
+    {
+        FILE* path_output = tmpfile();
+        int path_mutated = 0;
+        char path_text[128] = {0};
+        assert(path_output);
+        assert(ng_query_execute(
+                   r,
+                   "MATCH p=(a:Person)-[r:WORKS_AT]->(b) "
+                   "RETURN size(nodes(p)), size(relationships(p)), nodes(p)[0], "
+                   "relationships(p)[0]",
+                   path_output,
+                   &path_mutated) == NG_OK);
+        assert(!path_mutated && fseek(path_output, 0, SEEK_SET) == 0);
+        assert(fread(path_text, 1, sizeof(path_text) - 1, path_output) > 0);
+        assert(!strcmp(path_text, "2\t1\t1\t1\n"));
+        fclose(path_output);
+        path_output = tmpfile();
+        memset(path_text, 0, sizeof(path_text));
+        assert(path_output);
+        assert(ng_query_execute(
+                   r,
+                   "MATCH p=(a:Person)-[*1..2]->(b) "
+                   "RETURN size(nodes(p)), size(relationships(p))",
+                   path_output,
+                   &path_mutated) == NG_OK);
+        assert(!path_mutated && fseek(path_output, 0, SEEK_SET) == 0);
+        assert(fread(path_text, 1, sizeof(path_text) - 1, path_output) > 0);
+        assert(!strcmp(path_text, "2\t1\n3\t2\n"));
+        fclose(path_output);
+        path_output = tmpfile();
+        memset(path_text, 0, sizeof(path_text));
+        assert(path_output);
+        assert(ng_query_execute(
+                   r,
+                   "MATCH p=(a:Person)-[r:WORKS_AT]->(b) RETURN p",
+                   path_output,
+                   &path_mutated) == NG_OK);
+        assert(!path_mutated && fseek(path_output, 0, SEEK_SET) == 0);
+        assert(fread(path_text, 1, sizeof(path_text) - 1, path_output) > 0);
+        assert(!strcmp(path_text, "{nodes: [1, 2], relationships: [1]}\n"));
+        fclose(path_output);
+    }
+    {
+        FILE* merge_output = tmpfile();
+        int merge_mutated = 0;
+        char merge_text[128] = {0};
+        assert(merge_output);
+        assert(ng_query_execute(
+                   r,
+                   "WITH 1 AS seed MERGE (n:MergeHook {name: \"A\"}) "
+                   "ON CREATE SET n.state = \"created\" RETURN n.state",
+                   merge_output,
+                   &merge_mutated) == NG_OK);
+        assert(merge_mutated && fseek(merge_output, 0, SEEK_SET) == 0);
+        assert(fread(merge_text, 1, sizeof(merge_text) - 1, merge_output) > 0);
+        assert(!strcmp(merge_text, "created\n"));
+        fclose(merge_output);
+        merge_output = tmpfile();
+        memset(merge_text, 0, sizeof(merge_text));
+        assert(merge_output);
+        merge_mutated = 0;
+        assert(ng_query_execute(
+                   r,
+                   "WITH 1 AS seed MERGE (n:MergeHook {name: \"A\"}) "
+                   "ON MATCH SET n.state = \"matched\" RETURN n.state",
+                   merge_output,
+                   &merge_mutated) == NG_OK);
+        assert(merge_mutated && fseek(merge_output, 0, SEEK_SET) == 0);
+        assert(fread(merge_text, 1, sizeof(merge_text) - 1, merge_output) > 0);
+        assert(!strcmp(merge_text, "matched\n"));
+        fclose(merge_output);
+    }
+    {
         FILE* procedure_output = tmpfile();
         int procedure_mutated = 0;
         char procedure_text[64] = {0};
@@ -418,8 +603,11 @@ int main(void) {
     remove("test.ng");
     {
         ng_symbol_id rel;
+        ng_symbol_id weight;
+        ng_symbol_id person;
         ng_node_id c, d, iso;
-        ng_relationship_id rid;
+        ng_relationship_id rid, rid_ab, rid_bc, rid_ca, rid_cd;
+        ng_node_id shortest[8];
         ng_node_score scores[8];
         ng_node_metric metrics[8];
         ng_node_component comps[8];
@@ -429,15 +617,72 @@ int main(void) {
         double sum;
         assert(ng_create(&g, "analytics.ng") == NG_OK);
         assert(ng_symbol(g, "R", &rel) == NG_OK);
-        assert(ng_node_create(g, 0, 0, &a) == NG_OK);
-        assert(ng_node_create(g, 0, 0, &b) == NG_OK);
-        assert(ng_node_create(g, 0, 0, &c) == NG_OK);
+        assert(ng_symbol(g, "weight", &weight) == NG_OK);
+        assert(ng_symbol(g, "Person", &person) == NG_OK);
+        assert(ng_node_create(g, &person, 1, &a) == NG_OK);
+        assert(ng_node_create(g, &person, 1, &b) == NG_OK);
+        assert(ng_node_create(g, &person, 1, &c) == NG_OK);
         assert(ng_node_create(g, 0, 0, &d) == NG_OK);
         assert(ng_node_create(g, 0, 0, &iso) == NG_OK);
-        assert(ng_relationship_create(g, a, rel, b, &rid) == NG_OK);
-        assert(ng_relationship_create(g, b, rel, c, &rid) == NG_OK);
-        assert(ng_relationship_create(g, c, rel, a, &rid) == NG_OK);
-        assert(ng_relationship_create(g, c, rel, d, &rid) == NG_OK);
+        assert(ng_relationship_create(g, a, rel, b, &rid_ab) == NG_OK);
+        assert(ng_relationship_create(g, b, rel, c, &rid_bc) == NG_OK);
+        assert(ng_relationship_create(g, c, rel, a, &rid_ca) == NG_OK);
+        assert(ng_relationship_create(g, c, rel, d, &rid_cd) == NG_OK);
+        memset(&v, 0, sizeof(v));
+        v.type = NG_VALUE_INT64;
+        v.as.integer = 5;
+        assert(ng_relationship_set(g, rid_ab, weight, &v) == NG_OK);
+        v.as.integer = 2;
+        assert(ng_relationship_set(g, rid_bc, weight, &v) == NG_OK);
+        v.as.integer = 10;
+        assert(ng_relationship_set(g, rid_ca, weight, &v) == NG_OK);
+        v.as.integer = 1;
+        assert(ng_relationship_set(g, rid_cd, weight, &v) == NG_OK);
+        count = 0;
+        assert(ng_dijkstra(g, a, c, NG_DIRECTION_OUTGOING, rel, weight, shortest, 8, &count, &sum) ==
+                   NG_OK &&
+               count == 3 && shortest[0] == a && shortest[1] == b && shortest[2] == c &&
+               sum == 7.0);
+        assert(ng_dijkstra(g, a, iso, NG_DIRECTION_OUTGOING, rel, weight, shortest, 8, &count, &sum) ==
+               NG_NOT_FOUND &&
+               count == 0);
+        count = 0;
+        assert(ng_a_star(g,
+                         a,
+                         c,
+                         NG_DIRECTION_OUTGOING,
+                         rel,
+                         weight,
+                         zero_heuristic,
+                         NULL,
+                         shortest,
+                         8,
+                         &count,
+                         &sum) == NG_OK &&
+               count == 3 && shortest[0] == a && shortest[1] == b && shortest[2] == c &&
+               sum == 7.0);
+        count = 0;
+        assert(ng_bfs_path(g, a, d, NG_DIRECTION_OUTGOING, rel, shortest, 8, &count) == NG_OK &&
+               count == 4 && shortest[0] == a && shortest[1] == b && shortest[2] == c &&
+               shortest[3] == d);
+        assert(ng_bfs_path(g, a, iso, NG_DIRECTION_OUTGOING, rel, shortest, 8, &count) ==
+               NG_NOT_FOUND &&
+               count == 0);
+        {
+            path_context paths = {0};
+            assert(ng_enumerate_paths(g,
+                                      a,
+                                      d,
+                                      NG_DIRECTION_OUTGOING,
+                                      rel,
+                                      4,
+                                      4,
+                                      path_count_cb,
+                                      &paths,
+                                      &count) == NG_OK);
+            assert(count == 1 && paths.count == 1 && paths.length == 4 && paths.first == a &&
+                   paths.last == d);
+        }
         count = 0;
         assert(ng_degree_centrality(g, NG_DIRECTION_OUTGOING, rel, scores, 8, &count) == NG_OK &&
                count == 5);
@@ -460,9 +705,109 @@ int main(void) {
             sum += scores[i].score;
         }
         assert(absd(sum - 1.0) < 0.000001);
+        assert(ng_eigenvector_centrality(g, NG_DIRECTION_EITHER, rel, 25, scores, 8, &count) ==
+                   NG_OK &&
+               count == 5 && scores[0].score > 0.0 && scores[1].score > 0.0 &&
+               scores[2].score > scores[4].score);
+        assert(ng_closeness_centrality(g, NG_DIRECTION_EITHER, rel, scores, 8, &count) == NG_OK &&
+               count == 5 && scores[0].score > 0.0 && scores[2].score > scores[4].score);
+        assert(ng_harmonic_centrality(g, NG_DIRECTION_EITHER, rel, scores, 8, &count) == NG_OK &&
+               count == 5 && scores[0].score > 0.0 && scores[2].score > scores[4].score);
+        {
+            double embedding[15];
+            size_t embedding_count = 0;
+            assert(ng_fastrp(g, NG_DIRECTION_EITHER, rel, 2, 3, 7, embedding, 15, &embedding_count) ==
+                       NG_OK &&
+                   embedding_count == 5 &&
+                   (embedding[0] != 0.0 || embedding[1] != 0.0 || embedding[2] != 0.0));
+        }
+        {
+            const double features[10] = {1.0, 0.0, 0.0, 1.0, 1.0,
+                                         1.0, 0.5, 0.5, 0.2, 0.8};
+            double embedding[15];
+            size_t embedding_count = 0;
+            assert(ng_graphsage(g, NG_DIRECTION_EITHER, rel, 2, 2, 3, features, 7,
+                                embedding, 15, &embedding_count) == NG_OK &&
+                   embedding_count == 5 &&
+                   (embedding[0] != 0.0 || embedding[1] != 0.0 || embedding[2] != 0.0));
+        }
+        {
+            const double features[10] = {1.0, 0.0, 0.0, 1.0, 1.0,
+                                         1.0, 0.5, 0.5, 0.2, 0.8};
+            double embedding[15], loaded_embedding[15];
+            ng_graphsage_config config = {2, 2, 3, 1, 1, 42};
+            ng_graphsage_model* model = NULL;
+            ng_graphsage_model* loaded = NULL;
+            ng_vector_score nearest[2];
+            size_t node_count = 0, nearest_count = 0;
+            assert(ng_graphsage_model_create(&config, &model) == NG_OK);
+            assert(ng_graphsage_model_infer(model, g, NG_DIRECTION_EITHER, rel, features,
+                                            embedding, 15, &node_count) == NG_OK &&
+                   node_count == 5);
+            assert(ng_graphsage_model_save(model, "graphsage.model") == NG_OK);
+            assert(ng_graphsage_model_load("graphsage.model", &loaded) == NG_OK);
+            assert(ng_graphsage_model_infer(loaded, g, NG_DIRECTION_EITHER, rel, features,
+                                            loaded_embedding, 15, &node_count) == NG_OK);
+            for (i = 0; i < 15; i++)
+                assert(absd(embedding[i] - loaded_embedding[i]) < 0.0000001);
+            assert(ng_vector_search_cosine(embedding, 5, 3, embedding, 2, nearest, 2,
+                                           &nearest_count) == NG_OK &&
+                   nearest_count == 2 && nearest[0].index == 0 && nearest[0].score > 0.99);
+            ng_graphsage_model_free(loaded);
+            ng_graphsage_model_free(model);
+            remove("graphsage.model");
+            assert(ng_graphsage_model_create(&config, &model) == NG_OK);
+            {
+                const double targets[15] = {0.2, 0.1, 0.0, 0.1, 0.2,
+                                            0.0, 0.2, 0.1, 0.1, 0.0,
+                                            0.2, 0.1, 0.0, 0.1, 0.2};
+                double loss = -1.0;
+                assert(ng_graphsage_model_train(model, g, NG_DIRECTION_EITHER, rel, features,
+                                                targets, 1, 0.01, &loss) == NG_OK &&
+                       loss >= 0.0);
+            }
+            ng_graphsage_model_free(model);
+            assert(ng_vector_search_cosine(embedding, 5, 3, embedding, 2, nearest, 1,
+                                           &nearest_count) == NG_INVALID_ARGUMENT);
+        }
+        {
+            double embedding[15];
+            size_t embedding_count = 0;
+            assert(ng_node2vec(g, NG_DIRECTION_OUTGOING, rel, 1.0, 1.0, 2, 4, 3, 7,
+                               embedding, 15, &embedding_count) == NG_OK &&
+                   embedding_count == 5 &&
+                   (embedding[0] != 0.0 || embedding[1] != 0.0 || embedding[2] != 0.0));
+        }
         assert(ng_weakly_connected_components(g, rel, comps, 8, &count) == NG_OK && count == 5);
         assert(comps[0].component == 0 && comps[1].component == 0 && comps[2].component == 0 &&
                comps[3].component == 0 && comps[4].component == 1);
+        assert(ng_label_propagation(g, NG_DIRECTION_EITHER, rel, 10, comps, 8, &count) == NG_OK &&
+               count == 5 && comps[0].component == comps[1].component &&
+               comps[1].component == comps[2].component && comps[2].component == comps[3].component &&
+               comps[4].component != comps[0].component);
+        assert(ng_louvain(g, rel, 10, comps, 8, &count) == NG_OK && count == 5);
+        {
+            ng_node_id points[8];
+            ng_relationship_id bridges[8];
+            size_t point_count = 0, bridge_count = 0;
+            assert(ng_articulation_points(g, rel, points, 8, &point_count) == NG_OK &&
+                   point_count == 1 && points[0] == c);
+        assert(ng_bridges(g, rel, bridges, 8, &bridge_count) == NG_OK && bridge_count == 1 &&
+                   bridges[0] == rid_cd);
+            assert(ng_minimum_spanning_tree(g, rel, weight, bridges, 8, &bridge_count, &sum) ==
+                       NG_OK &&
+                   bridge_count == 3 && sum == 8.0);
+            assert(ng_max_flow(g, a, d, rel, weight, &sum) == NG_OK && sum == 1.0);
+        }
+        {
+            ng_link_score similar[2];
+            assert(ng_knn(g, a, NG_DIRECTION_EITHER, rel, 2, similar, 2, &count) == NG_OK &&
+                   count == 2 && similar[0].source == a && similar[1].source == a &&
+                   similar[0].score >= similar[1].score);
+            assert(ng_knn_filtered(g, a, NG_DIRECTION_EITHER, rel, person, 2, similar, 2, &count) ==
+                       NG_OK &&
+                   count == 2 && similar[0].target != d && similar[1].target != d);
+        }
         assert(ng_strongly_connected_components(g, rel, comps, 8, &count) == NG_OK && count == 5);
         assert(comps[0].component == 0 && comps[1].component == 0 && comps[2].component == 0 &&
                comps[3].component == 1 && comps[4].component == 2);
@@ -475,6 +820,8 @@ int main(void) {
         assert(ng_common_neighbors(g, a, c, rel, &u) == NG_OK && u == 1);
         assert(ng_total_neighbors(g, a, c, rel, &u) == NG_OK && u == 4);
         assert(ng_preferential_attachment(g, a, c, rel, &u) == NG_OK && u == 6);
+        assert(ng_adamic_adar(g, a, b, rel, &sum) == NG_OK && sum > 0.91 && sum < 0.92);
+        assert(ng_resource_allocation(g, a, b, rel, &sum) == NG_OK && sum > 0.32 && sum < 0.34);
         assert(ng_topological_sort(g, rel, order, 8, &count) == NG_EXISTS && count == 5);
         ng_close(g);
         remove("analytics.ng");

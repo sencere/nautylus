@@ -72,6 +72,19 @@ typedef struct {
 typedef struct ng_graph ng_graph;
 typedef struct ng_transaction ng_transaction;
 typedef struct ng_node_index ng_node_index;
+typedef struct ng_graphsage_model ng_graphsage_model;
+typedef struct {
+    uint32_t layers;
+    size_t input_dimensions;
+    size_t output_dimensions;
+    size_t neighborhood_sample;
+    int normalize_features;
+    uint64_t seed;
+} ng_graphsage_config;
+typedef struct {
+    size_t index;
+    double score;
+} ng_vector_score;
 typedef enum {
     NG_PROCEDURE_SCALAR = 0,
     NG_PROCEDURE_NODE = 1,
@@ -112,6 +125,8 @@ typedef enum {
 } ng_direction;
 typedef int (*ng_relationship_visitor)(const ng_relationship* relationship, void* context);
 typedef int (*ng_node_visitor)(ng_node_id node, uint32_t depth, void* context);
+typedef int (*ng_path_visitor)(const ng_node_id* path, size_t length, void* context);
+typedef double (*ng_path_heuristic)(ng_node_id node, ng_node_id target, void* context);
 typedef int (*ng_node_match_visitor)(ng_node_id node, void* context);
 typedef struct {
     ng_direction direction;
@@ -216,6 +231,46 @@ ng_status ng_degree_centrality(const ng_graph* g,
                                ng_node_score* out,
                                size_t capacity,
                                size_t* out_count);
+ng_status ng_dijkstra(const ng_graph* g,
+                      ng_node_id start,
+                      ng_node_id target,
+                      ng_direction direction,
+                      ng_symbol_id type,
+                      ng_symbol_id weight_key,
+                      ng_node_id* out_path,
+                      size_t capacity,
+                      size_t* out_count,
+                      double* out_distance);
+ng_status ng_bfs_path(const ng_graph* g,
+                      ng_node_id start,
+                      ng_node_id target,
+                      ng_direction direction,
+                      ng_symbol_id type,
+                      ng_node_id* out_path,
+                      size_t capacity,
+                      size_t* out_count);
+ng_status ng_enumerate_paths(const ng_graph* g,
+                             ng_node_id start,
+                             ng_node_id target,
+                             ng_direction direction,
+                             ng_symbol_id type,
+                             uint32_t max_depth,
+                             size_t max_paths,
+                             ng_path_visitor visitor,
+                             void* context,
+                             size_t* out_count);
+ng_status ng_a_star(const ng_graph* g,
+                    ng_node_id start,
+                    ng_node_id target,
+                    ng_direction direction,
+                    ng_symbol_id type,
+                    ng_symbol_id weight_key,
+                    ng_path_heuristic heuristic,
+                    void* heuristic_context,
+                    ng_node_id* out_path,
+                    size_t capacity,
+                    size_t* out_count,
+                    double* out_distance);
 ng_status ng_pagerank(const ng_graph* g,
                       ng_symbol_id type,
                       double damping,
@@ -223,6 +278,89 @@ ng_status ng_pagerank(const ng_graph* g,
                       ng_node_score* out,
                       size_t capacity,
                       size_t* out_count);
+ng_status ng_eigenvector_centrality(const ng_graph* g,
+                                    ng_direction direction,
+                                    ng_symbol_id type,
+                                    uint32_t iterations,
+                                    ng_node_score* out,
+                                    size_t capacity,
+                                    size_t* out_count);
+ng_status ng_closeness_centrality(const ng_graph* g,
+                                  ng_direction direction,
+                                  ng_symbol_id type,
+                                  ng_node_score* out,
+                                  size_t capacity,
+                                  size_t* out_count);
+ng_status ng_harmonic_centrality(const ng_graph* g,
+                                 ng_direction direction,
+                                 ng_symbol_id type,
+                                 ng_node_score* out,
+                                 size_t capacity,
+                                 size_t* out_count);
+ng_status ng_fastrp(const ng_graph* g,
+                    ng_direction direction,
+                    ng_symbol_id type,
+                    uint32_t iterations,
+                    size_t dimensions,
+                    uint64_t seed,
+                    double* out,
+                    size_t capacity,
+                    size_t* out_count);
+/* Deterministic lightweight Node2Vec-style random-walk embeddings. */
+ng_status ng_node2vec(const ng_graph* g,
+                      ng_direction direction,
+                      ng_symbol_id type,
+                      double p,
+                      double q,
+                      uint32_t walks_per_node,
+                      uint32_t walk_length,
+                      size_t dimensions,
+                      uint64_t seed,
+                      double* out,
+                      size_t capacity,
+                      size_t* out_count);
+/* Deterministic GraphSAGE-style mean aggregation over caller-owned features. */
+ng_status ng_graphsage(const ng_graph* g,
+                       ng_direction direction,
+                       ng_symbol_id type,
+                       uint32_t iterations,
+                       size_t input_dimensions,
+                       size_t output_dimensions,
+                       const double* features,
+                       uint64_t seed,
+                       double* out,
+                       size_t capacity,
+                       size_t* out_count);
+ng_status ng_graphsage_model_create(const ng_graphsage_config* config,
+                                    ng_graphsage_model** out);
+void ng_graphsage_model_free(ng_graphsage_model* model);
+ng_status ng_graphsage_model_infer(const ng_graphsage_model* model,
+                                   const ng_graph* g,
+                                   ng_direction direction,
+                                   ng_symbol_id type,
+                                   const double* features,
+                                   double* out,
+                                   size_t capacity,
+                                   size_t* out_count);
+ng_status ng_graphsage_model_train(ng_graphsage_model* model,
+                                   const ng_graph* g,
+                                   ng_direction direction,
+                                   ng_symbol_id type,
+                                   const double* features,
+                                   const double* targets,
+                                   uint32_t epochs,
+                                   double learning_rate,
+                                   double* out_loss);
+ng_status ng_graphsage_model_save(const ng_graphsage_model* model, const char* path);
+ng_status ng_graphsage_model_load(const char* path, ng_graphsage_model** out);
+ng_status ng_vector_search_cosine(const double* vectors,
+                                  size_t vector_count,
+                                  size_t dimensions,
+                                  const double* query,
+                                  size_t k,
+                                  ng_vector_score* out,
+                                  size_t capacity,
+                                  size_t* out_count);
 ng_status ng_weakly_connected_components(const ng_graph* g,
                                          ng_symbol_id type,
                                          ng_node_component* out,
@@ -233,6 +371,19 @@ ng_status ng_strongly_connected_components(const ng_graph* g,
                                            ng_node_component* out,
                                            size_t capacity,
                                            size_t* out_count);
+ng_status ng_label_propagation(const ng_graph* g,
+                               ng_direction direction,
+                               ng_symbol_id type,
+                               uint32_t iterations,
+                               ng_node_component* out,
+                               size_t capacity,
+                               size_t* out_count);
+ng_status ng_louvain(const ng_graph* g,
+                     ng_symbol_id type,
+                     uint32_t iterations,
+                     ng_node_component* out,
+                     size_t capacity,
+                     size_t* out_count);
 ng_status ng_triangle_count(
     const ng_graph* g, ng_symbol_id type, ng_node_metric* out, size_t capacity, size_t* out_count);
 ng_status ng_local_clustering_coefficient(
@@ -243,6 +394,56 @@ ng_status ng_preferential_attachment(
     const ng_graph* g, ng_node_id a, ng_node_id b, ng_symbol_id type, uint64_t* out);
 ng_status
 ng_total_neighbors(const ng_graph* g, ng_node_id a, ng_node_id b, ng_symbol_id type, uint64_t* out);
+ng_status ng_adamic_adar(const ng_graph* g,
+                         ng_node_id a,
+                         ng_node_id b,
+                         ng_symbol_id type,
+                         double* out);
+ng_status ng_resource_allocation(const ng_graph* g,
+                                 ng_node_id a,
+                                 ng_node_id b,
+                                 ng_symbol_id type,
+                                 double* out);
+ng_status ng_articulation_points(const ng_graph* g,
+                                 ng_symbol_id type,
+                                 ng_node_id* out,
+                                 size_t capacity,
+                                 size_t* out_count);
+ng_status ng_bridges(const ng_graph* g,
+                     ng_symbol_id type,
+                     ng_relationship_id* out,
+                     size_t capacity,
+                     size_t* out_count);
+ng_status ng_minimum_spanning_tree(const ng_graph* g,
+                                   ng_symbol_id type,
+                                   ng_symbol_id weight_key,
+                                   ng_relationship_id* out,
+                                   size_t capacity,
+                                   size_t* out_count,
+                                   double* out_weight);
+ng_status ng_max_flow(const ng_graph* g,
+                      ng_node_id source,
+                      ng_node_id target,
+                      ng_symbol_id type,
+                      ng_symbol_id capacity_key,
+                      double* out_flow);
+ng_status ng_knn(const ng_graph* g,
+                 ng_node_id source,
+                 ng_direction direction,
+                 ng_symbol_id type,
+                 size_t k,
+                 ng_link_score* out,
+                 size_t capacity,
+                 size_t* out_count);
+ng_status ng_knn_filtered(const ng_graph* g,
+                          ng_node_id source,
+                          ng_direction direction,
+                          ng_symbol_id type,
+                          ng_symbol_id candidate_label,
+                          size_t k,
+                          ng_link_score* out,
+                          size_t capacity,
+                          size_t* out_count);
 ng_status ng_topological_sort(
     const ng_graph* g, ng_symbol_id type, ng_node_id* out, size_t capacity, size_t* out_count);
 ng_status ng_random_walk(const ng_graph* g,

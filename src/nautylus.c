@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <ctype.h>
+#include <math.h>
 #define NG_VALUE_PARAM ((ng_value_type)255)
 static size_t ng_test_fail_after_count;
 static int ng_test_failure_enabled;
@@ -115,6 +116,16 @@ struct ng_transaction {
     ng_graph* target;
     ng_graph working;
     int active;
+};
+struct ng_graphsage_model {
+    uint32_t layers;
+    size_t input_dimensions;
+    size_t output_dimensions;
+    size_t neighborhood_sample;
+    int normalize_features;
+    uint64_t seed;
+    double** weights;
+    double** biases;
 };
 typedef struct {
     ng_node_id id;
@@ -1449,6 +1460,773 @@ static ng_status ng_analytics_check_output(
         return NG_INVALID_ARGUMENT;
     return NG_OK;
 }
+ng_status ng_label_propagation(const ng_graph* g,
+                               ng_direction direction,
+                               ng_symbol_id type,
+                               uint32_t iterations,
+                               ng_node_component* out,
+                               size_t capacity,
+                               size_t* out_count) {
+    uint64_t* labels;
+    uint64_t* next;
+    size_t i, j;
+    ng_status s;
+    if (direction > NG_DIRECTION_EITHER || !iterations)
+        return NG_INVALID_ARGUMENT;
+    s = ng_analytics_check_output(g, type, out, capacity, out_count);
+    if (s != NG_OK)
+        return s;
+    labels = (uint64_t*)malloc(g->nn * sizeof(*labels));
+    next = (uint64_t*)malloc(g->nn * sizeof(*next));
+    if ((g->nn && !labels) || (g->nn && !next)) {
+        free(labels);
+        free(next);
+        return NG_OOM;
+    }
+    for (i = 0; i < g->nn; i++)
+        labels[i] = (uint64_t)i;
+    for (j = 0; j < iterations; j++) {
+        int changed = 0;
+        for (i = 0; i < g->nn; i++) {
+            uint64_t best = labels[i];
+            size_t best_frequency = 0, candidate;
+            for (candidate = 0; candidate < g->nn; candidate++) {
+                size_t frequency = 0, node_index, edge;
+                int candidate_adjacent = 0;
+                for (edge = 0; edge < g->nr; edge++) {
+                    const rel_i* rel = &g->re[edge];
+                    if (!ng_analytics_rel_ok(rel, type))
+                        continue;
+                    if ((direction == NG_DIRECTION_OUTGOING &&
+                         rel->src == g->no[i].id && rel->dst == g->no[candidate].id) ||
+                        (direction == NG_DIRECTION_INCOMING &&
+                         rel->dst == g->no[i].id && rel->src == g->no[candidate].id) ||
+                        (direction == NG_DIRECTION_EITHER &&
+                         ((rel->src == g->no[i].id && rel->dst == g->no[candidate].id) ||
+                          (rel->dst == g->no[i].id && rel->src == g->no[candidate].id)))) {
+                        candidate_adjacent = 1;
+                        break;
+                    }
+                }
+                if (!candidate_adjacent)
+                    continue;
+                for (node_index = 0; node_index < g->nn; node_index++) {
+                    for (edge = 0; edge < g->nr; edge++) {
+                        const rel_i* rel = &g->re[edge];
+                        if (!ng_analytics_rel_ok(rel, type))
+                            continue;
+                        if (labels[node_index] != labels[candidate])
+                            break;
+                        if ((direction == NG_DIRECTION_OUTGOING &&
+                             rel->src == g->no[i].id && rel->dst == g->no[node_index].id) ||
+                            (direction == NG_DIRECTION_INCOMING &&
+                             rel->dst == g->no[i].id && rel->src == g->no[node_index].id) ||
+                            (direction == NG_DIRECTION_EITHER &&
+                             ((rel->src == g->no[i].id && rel->dst == g->no[node_index].id) ||
+                              (rel->dst == g->no[i].id && rel->src == g->no[node_index].id)))) {
+                            frequency++;
+                            break;
+                        }
+                    }
+                }
+                if (frequency > best_frequency ||
+                    (frequency == best_frequency && labels[candidate] < best)) {
+                    best = labels[candidate];
+                    best_frequency = frequency;
+                }
+            }
+            next[i] = best;
+            if (next[i] != labels[i])
+                changed = 1;
+        }
+        memcpy(labels, next, g->nn * sizeof(*labels));
+        if (!changed)
+            break;
+    }
+    for (i = 0; i < g->nn; i++) {
+        out[i].node = g->no[i].id;
+        out[i].component = labels[i];
+    }
+    free(labels);
+    free(next);
+    return NG_OK;
+}
+ng_status ng_knn(const ng_graph* g,
+                 ng_node_id source,
+                 ng_direction direction,
+                 ng_symbol_id type,
+                 size_t k,
+                 ng_link_score* out,
+                 size_t capacity,
+                 size_t* out_count) {
+    size_t source_pos, i, j, candidate_count = 0, wanted;
+    ng_link_score* candidates;
+    if (!g || direction > NG_DIRECTION_EITHER || !k || !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    source_pos = ng_node_position(g, source);
+    if (source_pos == SIZE_MAX)
+        return NG_NOT_FOUND;
+    candidates = (ng_link_score*)calloc(g->nn > 1 ? g->nn - 1 : 1, sizeof(*candidates));
+    if (!candidates)
+        return NG_OOM;
+    for (i = 0; i < g->nn; i++) {
+        unsigned char* a;
+        unsigned char* b;
+        size_t intersection = 0, union_count = 0;
+        if (i == source_pos)
+            continue;
+        a = (unsigned char*)calloc(g->nn, 1);
+        b = (unsigned char*)calloc(g->nn, 1);
+        if (!a || !b) {
+            free(a);
+            free(b);
+            free(candidates);
+            return NG_OOM;
+        }
+        for (j = 0; j < g->nr; j++) {
+            const rel_i* r = &g->re[j];
+            size_t other = SIZE_MAX;
+            if (!ng_analytics_rel_ok(r, type))
+                continue;
+            if (direction == NG_DIRECTION_OUTGOING && r->src == g->no[source_pos].id)
+                other = ng_node_position(g, r->dst);
+            else if (direction == NG_DIRECTION_INCOMING && r->dst == g->no[source_pos].id)
+                other = ng_node_position(g, r->src);
+            else if (direction == NG_DIRECTION_EITHER) {
+                if (r->src == g->no[source_pos].id)
+                    other = ng_node_position(g, r->dst);
+                else if (r->dst == g->no[source_pos].id)
+                    other = ng_node_position(g, r->src);
+            }
+            if (other != SIZE_MAX)
+                a[other] = 1;
+            other = SIZE_MAX;
+            if (direction == NG_DIRECTION_OUTGOING && r->src == g->no[i].id)
+                other = ng_node_position(g, r->dst);
+            else if (direction == NG_DIRECTION_INCOMING && r->dst == g->no[i].id)
+                other = ng_node_position(g, r->src);
+            else if (direction == NG_DIRECTION_EITHER) {
+                if (r->src == g->no[i].id)
+                    other = ng_node_position(g, r->dst);
+                else if (r->dst == g->no[i].id)
+                    other = ng_node_position(g, r->src);
+            }
+            if (other != SIZE_MAX)
+                b[other] = 1;
+        }
+        for (j = 0; j < g->nn; j++) {
+            if (a[j] || b[j])
+                union_count++;
+            if (a[j] && b[j])
+                intersection++;
+        }
+        candidates[candidate_count].source = source;
+        candidates[candidate_count].target = g->no[i].id;
+        candidates[candidate_count].score = union_count ? (double)intersection / union_count : 0.0;
+        candidate_count++;
+        free(a);
+        free(b);
+    }
+    for (i = 0; i < candidate_count; i++)
+        for (j = i + 1; j < candidate_count; j++)
+            if (candidates[j].score > candidates[i].score ||
+                (candidates[j].score == candidates[i].score &&
+                 candidates[j].target < candidates[i].target)) {
+                ng_link_score swap = candidates[i];
+                candidates[i] = candidates[j];
+                candidates[j] = swap;
+            }
+    wanted = k < candidate_count ? k : candidate_count;
+    if (!out_count || !out || capacity < wanted) {
+        free(candidates);
+        return NG_LIMIT;
+    }
+    memcpy(out, candidates, wanted * sizeof(*out));
+    *out_count = wanted;
+    free(candidates);
+    return NG_OK;
+}
+ng_status ng_knn_filtered(const ng_graph* g,
+                          ng_node_id source,
+                          ng_direction direction,
+                          ng_symbol_id type,
+                          ng_symbol_id candidate_label,
+                          size_t k,
+                          ng_link_score* out,
+                          size_t capacity,
+                          size_t* out_count) {
+    ng_link_score* ranked;
+    size_t ranked_count = 0, i, selected = 0;
+    if (!g || !candidate_label || !ng_analytics_symbol_ok(g, candidate_label))
+        return NG_INVALID_ARGUMENT;
+    if (!k)
+        return NG_INVALID_ARGUMENT;
+    ranked = (ng_link_score*)calloc(g->nn ? g->nn : 1, sizeof(*ranked));
+    if (!ranked)
+        return NG_OOM;
+    if (ng_knn(g, source, direction, type, g->nn ? g->nn - 1 : 1, ranked, g->nn, &ranked_count) !=
+        NG_OK) {
+        free(ranked);
+        return NG_PARSE_ERROR;
+    }
+    for (i = 0; i < ranked_count && selected < k; i++) {
+        size_t position = ng_node_position(g, ranked[i].target);
+        int has_label = 0;
+        if (position != SIZE_MAX) {
+            size_t label_index;
+            for (label_index = 0; label_index < g->no[position].nl; label_index++)
+                if (g->no[position].labels[label_index] == candidate_label) {
+                    has_label = 1;
+                    break;
+                }
+        }
+        if (has_label) {
+            if (selected >= capacity || !out) {
+                free(ranked);
+                return NG_LIMIT;
+            }
+            out[selected++] = ranked[i];
+        }
+    }
+    if (!out_count) {
+        free(ranked);
+        return NG_INVALID_ARGUMENT;
+    }
+    *out_count = selected;
+    free(ranked);
+    return NG_OK;
+}
+ng_status ng_louvain(const ng_graph* g,
+                     ng_symbol_id type,
+                     uint32_t iterations,
+                     ng_node_component* out,
+                     size_t capacity,
+                     size_t* out_count) {
+    uint64_t* community;
+    double* degree;
+    double* total;
+    size_t i, j;
+    ng_status s;
+    if (!g || !iterations || !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    s = ng_analytics_check_output(g, type, out, capacity, out_count);
+    if (s != NG_OK)
+        return s;
+    community = (uint64_t*)malloc(g->nn * sizeof(*community));
+    degree = (double*)calloc(g->nn, sizeof(*degree));
+    total = (double*)calloc(g->nn, sizeof(*total));
+    if ((g->nn && !community) || (g->nn && (!degree || !total))) {
+        free(community);
+        free(degree);
+        free(total);
+        return NG_OOM;
+    }
+    for (i = 0; i < g->nn; i++)
+        community[i] = (uint64_t)i;
+    for (i = 0; i < g->nr; i++) {
+        const rel_i* rel = &g->re[i];
+        size_t a, b;
+        if (!ng_analytics_rel_ok(rel, type))
+            continue;
+        a = ng_node_position(g, rel->src);
+        b = ng_node_position(g, rel->dst);
+        if (a != SIZE_MAX && b != SIZE_MAX) {
+            degree[a] += 1.0;
+            degree[b] += 1.0;
+        }
+    }
+    for (i = 0; i < g->nn; i++)
+        total[i] = degree[i];
+    for (j = 0; j < iterations; j++) {
+        int changed = 0;
+        for (i = 0; i < g->nn; i++) {
+            uint64_t old = community[i], best = community[i];
+            double best_gain = 0.0;
+            size_t candidate;
+            total[old] -= degree[i];
+            for (candidate = 0; candidate < g->nn; candidate++) {
+                double links = 0.0, gain;
+                size_t edge;
+                for (edge = 0; edge < g->nr; edge++) {
+                    const rel_i* rel = &g->re[edge];
+                    size_t other = SIZE_MAX;
+                    if (!ng_analytics_rel_ok(rel, type))
+                        continue;
+                    if (rel->src == g->no[i].id)
+                        other = ng_node_position(g, rel->dst);
+                    else if (rel->dst == g->no[i].id)
+                        other = ng_node_position(g, rel->src);
+                    if (other != SIZE_MAX && community[other] == (uint64_t)candidate)
+                        links += 1.0;
+                }
+                gain = links - degree[i] * total[candidate] / 2.0;
+                if (gain > best_gain ||
+                    (gain == best_gain && (uint64_t)candidate < best)) {
+                    best = (uint64_t)candidate;
+                    best_gain = gain;
+                }
+            }
+            community[i] = best;
+            total[best] += degree[i];
+            if (best != old)
+                changed = 1;
+        }
+        if (!changed)
+            break;
+    }
+    for (i = 0; i < g->nn; i++) {
+        out[i].node = g->no[i].id;
+        out[i].component = community[i];
+    }
+    free(community);
+    free(degree);
+    free(total);
+    return NG_OK;
+}
+ng_status ng_dijkstra(const ng_graph* g,
+                      ng_node_id start,
+                      ng_node_id target,
+                      ng_direction direction,
+                      ng_symbol_id type,
+                      ng_symbol_id weight_key,
+                      ng_node_id* out_path,
+                      size_t capacity,
+                      size_t* out_count,
+                      double* out_distance) {
+    size_t source, destination, i, path_count = 0, path_length;
+    double* distance;
+    size_t* previous;
+    unsigned char* used;
+    if (!g || direction > NG_DIRECTION_EITHER || !ng_analytics_symbol_ok(g, type) ||
+        (weight_key && !ng_analytics_symbol_ok(g, weight_key)))
+        return NG_INVALID_ARGUMENT;
+    source = ng_node_position(g, start);
+    destination = ng_node_position(g, target);
+    if (source == SIZE_MAX || destination == SIZE_MAX)
+        return NG_NOT_FOUND;
+    distance = (double*)malloc(g->nn * sizeof(*distance));
+    previous = (size_t*)malloc(g->nn * sizeof(*previous));
+    used = (unsigned char*)calloc(g->nn, 1);
+    if ((g->nn && !distance) || (g->nn && (!previous || !used))) {
+        free(distance);
+        free(previous);
+        free(used);
+        return NG_OOM;
+    }
+    for (i = 0; i < g->nn; i++) {
+        distance[i] = 1e300;
+        previous[i] = SIZE_MAX;
+    }
+    distance[source] = 0;
+    for (;;) {
+        size_t current = SIZE_MAX;
+        for (i = 0; i < g->nn; i++)
+            if (!used[i] && (current == SIZE_MAX || distance[i] < distance[current]))
+                current = i;
+        if (current == SIZE_MAX || distance[current] >= 1e299)
+            break;
+        used[current] = 1;
+        if (current == destination)
+            break;
+        for (i = 0; i < g->nr; i++) {
+            const rel_i* r = &g->re[i];
+            size_t next = SIZE_MAX;
+            double weight = 1.0;
+            const prop* property;
+            if (!ng_analytics_rel_ok(r, type))
+                continue;
+            if (direction == NG_DIRECTION_OUTGOING && r->src == g->no[current].id)
+                next = ng_node_position(g, r->dst);
+            else if (direction == NG_DIRECTION_INCOMING && r->dst == g->no[current].id)
+                next = ng_node_position(g, r->src);
+            else if (direction == NG_DIRECTION_EITHER) {
+                if (r->src == g->no[current].id)
+                    next = ng_node_position(g, r->dst);
+                else if (r->dst == g->no[current].id)
+                    next = ng_node_position(g, r->src);
+            }
+            if (next == SIZE_MAX || used[next])
+                continue;
+            if (weight_key) {
+                property = findprop(r->p, r->np, weight_key);
+                if (property) {
+                    if (property->v.type == NG_VALUE_INT64)
+                        weight = (double)property->v.as.integer;
+                    else if (property->v.type == NG_VALUE_DOUBLE)
+                        weight = property->v.as.real;
+                    else
+                        return (free(distance), free(previous), free(used), NG_PARSE_ERROR);
+                    if (weight < 0)
+                        return (free(distance), free(previous), free(used), NG_PARSE_ERROR);
+                }
+            }
+            if (distance[current] + weight < distance[next]) {
+                distance[next] = distance[current] + weight;
+                previous[next] = current;
+            }
+        }
+    }
+    if (distance[destination] >= 1e299) {
+        free(distance);
+        free(previous);
+        free(used);
+        if (out_count)
+            *out_count = 0;
+        return NG_NOT_FOUND;
+    }
+    for (i = destination;; i = previous[i]) {
+        path_count++;
+        if (i == source)
+            break;
+    }
+    path_length = path_count;
+    if (!out_count || capacity < path_length || !out_path) {
+        free(distance);
+        free(previous);
+        free(used);
+        return NG_LIMIT;
+    }
+    for (i = destination; i != SIZE_MAX; i = previous[i])
+        out_path[--path_count] = g->no[i].id;
+    *out_count = path_length;
+    if (out_distance)
+        *out_distance = distance[destination];
+    free(distance);
+    free(previous);
+    free(used);
+    return NG_OK;
+}
+ng_status ng_bfs_path(const ng_graph* g,
+                      ng_node_id start,
+                      ng_node_id target,
+                      ng_direction direction,
+                      ng_symbol_id type,
+                      ng_node_id* out_path,
+                      size_t capacity,
+                      size_t* out_count) {
+    size_t source, destination, head = 0, tail = 0, i, path_count = 0, path_length;
+    size_t* queue;
+    size_t* previous;
+    unsigned char* visited;
+    if (!g || direction > NG_DIRECTION_EITHER || !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    source = ng_node_position(g, start);
+    destination = ng_node_position(g, target);
+    if (source == SIZE_MAX || destination == SIZE_MAX)
+        return NG_NOT_FOUND;
+    queue = (size_t*)malloc(g->nn * sizeof(*queue));
+    previous = (size_t*)malloc(g->nn * sizeof(*previous));
+    visited = (unsigned char*)calloc(g->nn, 1);
+    if ((g->nn && !queue) || (g->nn && (!previous || !visited))) {
+        free(queue);
+        free(previous);
+        free(visited);
+        return NG_OOM;
+    }
+    for (i = 0; i < g->nn; i++)
+        previous[i] = SIZE_MAX;
+    queue[tail++] = source;
+    visited[source] = 1;
+    while (head < tail && !visited[destination]) {
+        size_t current = queue[head++];
+        for (i = 0; i < g->nr; i++) {
+            const rel_i* r = &g->re[i];
+            size_t next = SIZE_MAX;
+            if (!ng_analytics_rel_ok(r, type))
+                continue;
+            if (direction == NG_DIRECTION_OUTGOING && r->src == g->no[current].id)
+                next = ng_node_position(g, r->dst);
+            else if (direction == NG_DIRECTION_INCOMING && r->dst == g->no[current].id)
+                next = ng_node_position(g, r->src);
+            else if (direction == NG_DIRECTION_EITHER) {
+                if (r->src == g->no[current].id)
+                    next = ng_node_position(g, r->dst);
+                else if (r->dst == g->no[current].id)
+                    next = ng_node_position(g, r->src);
+            }
+            if (next == SIZE_MAX || visited[next])
+                continue;
+            visited[next] = 1;
+            previous[next] = current;
+            queue[tail++] = next;
+        }
+    }
+    if (!visited[destination]) {
+        free(queue);
+        free(previous);
+        free(visited);
+        if (out_count)
+            *out_count = 0;
+        return NG_NOT_FOUND;
+    }
+    for (i = destination;; i = previous[i]) {
+        path_count++;
+        if (i == source)
+            break;
+    }
+    path_length = path_count;
+    if (!out_count || !out_path || capacity < path_length) {
+        free(queue);
+        free(previous);
+        free(visited);
+        return NG_LIMIT;
+    }
+    for (i = destination; i != SIZE_MAX; i = previous[i])
+        out_path[--path_count] = g->no[i].id;
+    *out_count = path_length;
+    free(queue);
+    free(previous);
+    free(visited);
+    return NG_OK;
+}
+static ng_status ng_enumerate_paths_dfs(const ng_graph* g,
+                                        size_t current,
+                                        size_t target,
+                                        ng_direction direction,
+                                        ng_symbol_id type,
+                                        uint32_t max_depth,
+                                        size_t max_paths,
+                                        ng_node_id* path,
+                                        size_t depth,
+                                        unsigned char* visited,
+                                        ng_path_visitor visitor,
+                                        void* context,
+                                        size_t* found,
+                                        int* stop) {
+    size_t i;
+    if (current == target) {
+        (*found)++;
+        if (!visitor(path, depth + 1, context))
+            *stop = 1;
+        return NG_OK;
+    }
+    if (depth >= max_depth || *stop || (max_paths && *found >= max_paths))
+        return NG_OK;
+    for (i = 0; i < g->nr; i++) {
+        const rel_i* r = &g->re[i];
+        size_t next = SIZE_MAX;
+        if (!ng_analytics_rel_ok(r, type))
+            continue;
+        if (direction == NG_DIRECTION_OUTGOING && r->src == g->no[current].id)
+            next = ng_node_position(g, r->dst);
+        else if (direction == NG_DIRECTION_INCOMING && r->dst == g->no[current].id)
+            next = ng_node_position(g, r->src);
+        else if (direction == NG_DIRECTION_EITHER) {
+            if (r->src == g->no[current].id)
+                next = ng_node_position(g, r->dst);
+            else if (r->dst == g->no[current].id)
+                next = ng_node_position(g, r->src);
+        }
+        if (next == SIZE_MAX || visited[next])
+            continue;
+        visited[next] = 1;
+        path[depth + 1] = g->no[next].id;
+        if (ng_enumerate_paths_dfs(g,
+                                   next,
+                                   target,
+                                   direction,
+                                   type,
+                                   max_depth,
+                                   max_paths,
+                                   path,
+                                   depth + 1,
+                                   visited,
+                                   visitor,
+                                   context,
+                                   found,
+                                   stop) != NG_OK)
+            return NG_OOM;
+        visited[next] = 0;
+        if (*stop || (max_paths && *found >= max_paths))
+            break;
+    }
+    return NG_OK;
+}
+ng_status ng_enumerate_paths(const ng_graph* g,
+                             ng_node_id start,
+                             ng_node_id target,
+                             ng_direction direction,
+                             ng_symbol_id type,
+                             uint32_t max_depth,
+                             size_t max_paths,
+                             ng_path_visitor visitor,
+                             void* context,
+                             size_t* out_count) {
+    size_t source, destination, found = 0;
+    ng_node_id* path;
+    unsigned char* visited;
+    int stop = 0;
+    ng_status s;
+    if (!g || direction > NG_DIRECTION_EITHER || !max_depth || !visitor ||
+        !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    source = ng_node_position(g, start);
+    destination = ng_node_position(g, target);
+    if (source == SIZE_MAX || destination == SIZE_MAX)
+        return NG_NOT_FOUND;
+    path = (ng_node_id*)malloc(((size_t)max_depth + 1) * sizeof(*path));
+    visited = (unsigned char*)calloc(g->nn, 1);
+    if (!path || (g->nn && !visited)) {
+        free(path);
+        free(visited);
+        return NG_OOM;
+    }
+    path[0] = start;
+    visited[source] = 1;
+    s = ng_enumerate_paths_dfs(g,
+                               source,
+                               destination,
+                               direction,
+                               type,
+                               max_depth,
+                               max_paths,
+                               path,
+                               0,
+                               visited,
+                               visitor,
+                               context,
+                               &found,
+                               &stop);
+    free(path);
+    free(visited);
+    if (out_count)
+        *out_count = found;
+    return s;
+}
+ng_status ng_a_star(const ng_graph* g,
+                    ng_node_id start,
+                    ng_node_id target,
+                    ng_direction direction,
+                    ng_symbol_id type,
+                    ng_symbol_id weight_key,
+                    ng_path_heuristic heuristic,
+                    void* heuristic_context,
+                    ng_node_id* out_path,
+                    size_t capacity,
+                    size_t* out_count,
+                    double* out_distance) {
+    size_t source, destination, i, path_count = 0, path_length;
+    double* distance;
+    double* score;
+    size_t* previous;
+    unsigned char* used;
+    if (!g || direction > NG_DIRECTION_EITHER || !heuristic ||
+        !ng_analytics_symbol_ok(g, type) ||
+        (weight_key && !ng_analytics_symbol_ok(g, weight_key)))
+        return NG_INVALID_ARGUMENT;
+    source = ng_node_position(g, start);
+    destination = ng_node_position(g, target);
+    if (source == SIZE_MAX || destination == SIZE_MAX)
+        return NG_NOT_FOUND;
+    distance = (double*)malloc(g->nn * sizeof(*distance));
+    score = (double*)malloc(g->nn * sizeof(*score));
+    previous = (size_t*)malloc(g->nn * sizeof(*previous));
+    used = (unsigned char*)calloc(g->nn, 1);
+    if ((g->nn && (!distance || !score || !previous || !used))) {
+        free(distance);
+        free(score);
+        free(previous);
+        free(used);
+        return NG_OOM;
+    }
+    for (i = 0; i < g->nn; i++) {
+        distance[i] = 1e300;
+        score[i] = 1e300;
+        previous[i] = SIZE_MAX;
+    }
+    distance[source] = 0;
+    score[source] = heuristic(start, target, heuristic_context);
+    if (score[source] < 0)
+        return (free(distance), free(score), free(previous), free(used), NG_INVALID_ARGUMENT);
+    for (;;) {
+        size_t current = SIZE_MAX;
+        for (i = 0; i < g->nn; i++)
+            if (!used[i] && (current == SIZE_MAX || score[i] < score[current]))
+                current = i;
+        if (current == SIZE_MAX || score[current] >= 1e299)
+            break;
+        used[current] = 1;
+        if (current == destination)
+            break;
+        for (i = 0; i < g->nr; i++) {
+            const rel_i* r = &g->re[i];
+            size_t next = SIZE_MAX;
+            double weight = 1.0, estimate, candidate;
+            const prop* property;
+            if (!ng_analytics_rel_ok(r, type))
+                continue;
+            if (direction == NG_DIRECTION_OUTGOING && r->src == g->no[current].id)
+                next = ng_node_position(g, r->dst);
+            else if (direction == NG_DIRECTION_INCOMING && r->dst == g->no[current].id)
+                next = ng_node_position(g, r->src);
+            else if (direction == NG_DIRECTION_EITHER) {
+                if (r->src == g->no[current].id)
+                    next = ng_node_position(g, r->dst);
+                else if (r->dst == g->no[current].id)
+                    next = ng_node_position(g, r->src);
+            }
+            if (next == SIZE_MAX || used[next])
+                continue;
+            if (weight_key) {
+                property = findprop(r->p, r->np, weight_key);
+                if (property) {
+                    if (property->v.type == NG_VALUE_INT64)
+                        weight = (double)property->v.as.integer;
+                    else if (property->v.type == NG_VALUE_DOUBLE)
+                        weight = property->v.as.real;
+                    else
+                        return (free(distance), free(score), free(previous), free(used),
+                                NG_PARSE_ERROR);
+                    if (weight < 0)
+                        return (free(distance), free(score), free(previous), free(used),
+                                NG_PARSE_ERROR);
+                }
+            }
+            candidate = distance[current] + weight;
+            if (candidate >= distance[next])
+                continue;
+            estimate = heuristic(g->no[next].id, target, heuristic_context);
+            if (estimate < 0)
+                return (free(distance), free(score), free(previous), free(used),
+                        NG_INVALID_ARGUMENT);
+            distance[next] = candidate;
+            score[next] = candidate + estimate;
+            previous[next] = current;
+        }
+    }
+    if (distance[destination] >= 1e299) {
+        free(distance);
+        free(score);
+        free(previous);
+        free(used);
+        if (out_count)
+            *out_count = 0;
+        return NG_NOT_FOUND;
+    }
+    for (i = destination;; i = previous[i]) {
+        path_count++;
+        if (i == source)
+            break;
+    }
+    path_length = path_count;
+    if (!out_count || !out_path || capacity < path_length) {
+        free(distance);
+        free(score);
+        free(previous);
+        free(used);
+        return NG_LIMIT;
+    }
+    for (i = destination; i != SIZE_MAX; i = previous[i])
+        out_path[--path_count] = g->no[i].id;
+    *out_count = path_length;
+    if (out_distance)
+        *out_distance = distance[destination];
+    free(distance);
+    free(score);
+    free(previous);
+    free(used);
+    return NG_OK;
+}
 ng_status ng_degree_centrality(const ng_graph* g,
                                ng_direction direction,
                                ng_symbol_id type,
@@ -1547,6 +2325,836 @@ ng_status ng_pagerank(const ng_graph* g,
     free(next);
     free(outdeg);
     return NG_OK;
+}
+ng_status ng_eigenvector_centrality(const ng_graph* g,
+                                    ng_direction direction,
+                                    ng_symbol_id type,
+                                    uint32_t iterations,
+                                    ng_node_score* out,
+                                    size_t capacity,
+                                    size_t* out_count) {
+    double* values;
+    double* next;
+    size_t i, j;
+    ng_status s;
+    if (!g || direction > NG_DIRECTION_EITHER || !iterations)
+        return NG_INVALID_ARGUMENT;
+    s = ng_analytics_check_output(g, type, out, capacity, out_count);
+    if (s != NG_OK)
+        return s;
+    values = (double*)malloc(g->nn * sizeof(*values));
+    next = (double*)malloc(g->nn * sizeof(*next));
+    if ((g->nn && !values) || (g->nn && !next)) {
+        free(values);
+        free(next);
+        return NG_OOM;
+    }
+    for (i = 0; i < g->nn; i++)
+        values[i] = 1.0;
+    while (iterations--) {
+        double norm = 0.0;
+        for (i = 0; i < g->nn; i++) {
+            next[i] = 0.0;
+            for (j = 0; j < g->nr; j++) {
+                const rel_i* rel = &g->re[j];
+                size_t other = SIZE_MAX;
+                if (!ng_analytics_rel_ok(rel, type))
+                    continue;
+                if (direction == NG_DIRECTION_OUTGOING && rel->src == g->no[i].id)
+                    other = ng_node_position(g, rel->dst);
+                else if (direction == NG_DIRECTION_INCOMING && rel->dst == g->no[i].id)
+                    other = ng_node_position(g, rel->src);
+                else if (direction == NG_DIRECTION_EITHER) {
+                    if (rel->src == g->no[i].id)
+                        other = ng_node_position(g, rel->dst);
+                    else if (rel->dst == g->no[i].id)
+                        other = ng_node_position(g, rel->src);
+                }
+                if (other != SIZE_MAX)
+                    next[i] += values[other];
+            }
+            norm += next[i] * next[i];
+        }
+        norm = sqrt(norm);
+        if (norm == 0.0)
+            break;
+        for (i = 0; i < g->nn; i++)
+            values[i] = next[i] / norm;
+    }
+    for (i = 0; i < g->nn; i++) {
+        out[i].node = g->no[i].id;
+        out[i].score = values[i];
+    }
+    free(values);
+    free(next);
+    return NG_OK;
+}
+static uint64_t ng_embedding_random(uint64_t value) {
+    value ^= value >> 30;
+    value *= UINT64_C(0xbf58476d1ce4e5b9);
+    value ^= value >> 27;
+    value *= UINT64_C(0x94d049bb133111eb);
+    return value ^ (value >> 31);
+}
+ng_status ng_fastrp(const ng_graph* g,
+                    ng_direction direction,
+                    ng_symbol_id type,
+                    uint32_t iterations,
+                    size_t dimensions,
+                    uint64_t seed,
+                    double* out,
+                    size_t capacity,
+                    size_t* out_count) {
+    double* vectors;
+    double* next;
+    size_t total, i, d, step;
+    ng_status s;
+    if (!g || direction > NG_DIRECTION_EITHER || !iterations || !dimensions ||
+        !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    if (dimensions > SIZE_MAX / (g->nn ? g->nn : 1))
+        return NG_LIMIT;
+    total = g->nn * dimensions;
+    if (capacity < total || (total && !out))
+        return NG_LIMIT;
+    s = ng_analytics_check_output(g, type, g->nn ? out : NULL, g->nn, out_count);
+    if (s != NG_OK)
+        return s;
+    vectors = (double*)malloc(total * sizeof(*vectors));
+    next = (double*)malloc(total * sizeof(*next));
+    if ((total && !vectors) || (total && !next)) {
+        free(vectors);
+        free(next);
+        return NG_OOM;
+    }
+    for (i = 0; i < g->nn; i++)
+        for (d = 0; d < dimensions; d++)
+            vectors[i * dimensions + d] =
+                (double)(ng_embedding_random(seed + i * UINT64_C(1315423911) + d) % 2001) /
+                    1000.0 -
+                1.0;
+    for (step = 0; step < iterations; step++) {
+        for (i = 0; i < g->nn; i++)
+            for (d = 0; d < dimensions; d++)
+                next[i * dimensions + d] = vectors[i * dimensions + d];
+        for (i = 0; i < g->nr; i++) {
+            const rel_i* rel = &g->re[i];
+            size_t a = ng_node_position(g, rel->src), b = ng_node_position(g, rel->dst);
+            if (!ng_analytics_rel_ok(rel, type) || a == SIZE_MAX || b == SIZE_MAX)
+                continue;
+            if (direction == NG_DIRECTION_OUTGOING || direction == NG_DIRECTION_EITHER)
+                for (d = 0; d < dimensions; d++)
+                    next[b * dimensions + d] += vectors[a * dimensions + d];
+            if (direction == NG_DIRECTION_INCOMING || direction == NG_DIRECTION_EITHER)
+                for (d = 0; d < dimensions; d++)
+                    next[a * dimensions + d] += vectors[b * dimensions + d];
+        }
+        for (i = 0; i < g->nn; i++) {
+            double norm = 0.0;
+            for (d = 0; d < dimensions; d++)
+                norm += next[i * dimensions + d] * next[i * dimensions + d];
+            norm = sqrt(norm);
+            for (d = 0; d < dimensions; d++)
+                vectors[i * dimensions + d] = norm ? next[i * dimensions + d] / norm
+                                                     : next[i * dimensions + d];
+        }
+    }
+    memcpy(out, vectors, total * sizeof(*out));
+    free(vectors);
+    free(next);
+    return NG_OK;
+}
+ng_status ng_node2vec(const ng_graph* g,
+                      ng_direction direction,
+                      ng_symbol_id type,
+                      double p,
+                      double q,
+                      uint32_t walks_per_node,
+                      uint32_t walk_length,
+                      size_t dimensions,
+                      uint64_t seed,
+                      double* out,
+                      size_t capacity,
+                      size_t* out_count) {
+    double* base;
+    size_t total, i, d, walk;
+    ng_status s;
+    if (!g || direction > NG_DIRECTION_EITHER || !p || !q || p < 0.0 || q < 0.0 ||
+        !walks_per_node || !walk_length || !dimensions || !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    if (dimensions > SIZE_MAX / (g->nn ? g->nn : 1))
+        return NG_LIMIT;
+    total = g->nn * dimensions;
+    if (capacity < total || (total && !out))
+        return NG_LIMIT;
+    s = ng_analytics_check_output(g, type, g->nn ? out : NULL, g->nn, out_count);
+    if (s != NG_OK)
+        return s;
+    base = (double*)malloc(total * sizeof(*base));
+    if (total && !base)
+        return NG_OOM;
+    for (i = 0; i < g->nn; i++) {
+        for (d = 0; d < dimensions; d++) {
+            base[i * dimensions + d] =
+                (double)(ng_embedding_random(seed + i * UINT64_C(1315423911) + d) % 2001) /
+                    1000.0 - 1.0;
+            out[i * dimensions + d] = 0.0;
+        }
+    }
+    for (i = 0; i < g->nn; i++) {
+        size_t samples = 0;
+        for (walk = 0; walk < walks_per_node; walk++) {
+            size_t current = i, previous = SIZE_MAX, step;
+            for (step = 0; step < walk_length; step++) {
+                size_t* candidates = NULL;
+                size_t candidate_count = 0, j, chosen;
+                double total_weight = 0.0, pick, cumulative;
+                for (j = 0; j < g->nr; j++) {
+                    const rel_i* rel = &g->re[j];
+                    size_t other = SIZE_MAX;
+                    if (!ng_analytics_rel_ok(rel, type))
+                        continue;
+                    if ((direction == NG_DIRECTION_OUTGOING || direction == NG_DIRECTION_EITHER) &&
+                        ng_node_position(g, rel->src) == current)
+                        other = ng_node_position(g, rel->dst);
+                    else if ((direction == NG_DIRECTION_INCOMING || direction == NG_DIRECTION_EITHER) &&
+                             ng_node_position(g, rel->dst) == current)
+                        other = ng_node_position(g, rel->src);
+                    if (other != SIZE_MAX)
+                        candidate_count++;
+                }
+                if (!candidate_count)
+                    break;
+                candidates = (size_t*)malloc(candidate_count * sizeof(*candidates));
+                if (!candidates) {
+                    free(base);
+                    return NG_OOM;
+                }
+                candidate_count = 0;
+                for (j = 0; j < g->nr; j++) {
+                    const rel_i* rel = &g->re[j];
+                    size_t other = SIZE_MAX;
+                    if (!ng_analytics_rel_ok(rel, type))
+                        continue;
+                    if ((direction == NG_DIRECTION_OUTGOING || direction == NG_DIRECTION_EITHER) &&
+                        ng_node_position(g, rel->src) == current)
+                        other = ng_node_position(g, rel->dst);
+                    else if ((direction == NG_DIRECTION_INCOMING || direction == NG_DIRECTION_EITHER) &&
+                             ng_node_position(g, rel->dst) == current)
+                        other = ng_node_position(g, rel->src);
+                    if (other == SIZE_MAX)
+                        continue;
+                    candidates[candidate_count++] = other;
+                    total_weight += previous == SIZE_MAX ? 1.0 :
+                        (other == previous ? 1.0 / p :
+                         ng_analytics_adjacent(g, previous, other, type) ? 1.0 : 1.0 / q);
+                }
+                pick = (double)(ng_embedding_random(seed + i * UINT64_C(11400714819323198485) +
+                                                    walk * UINT64_C(7046029254386353131) + step) %
+                                UINT64_C(1000000)) /
+                       1000000.0 * total_weight;
+                cumulative = 0.0;
+                chosen = candidates[candidate_count - 1];
+                for (j = 0; j < candidate_count; j++) {
+                    double weight = previous == SIZE_MAX ? 1.0 :
+                        (candidates[j] == previous ? 1.0 / p :
+                         ng_analytics_adjacent(g, previous, candidates[j], type) ? 1.0 : 1.0 / q);
+                    cumulative += weight;
+                    if (pick < cumulative) {
+                        chosen = candidates[j];
+                        break;
+                    }
+                }
+                free(candidates);
+                previous = current;
+                current = chosen;
+                samples++;
+                for (d = 0; d < dimensions; d++)
+                    out[i * dimensions + d] += base[current * dimensions + d];
+            }
+        }
+        if (samples)
+            for (d = 0; d < dimensions; d++)
+                out[i * dimensions + d] /= (double)samples;
+    }
+    free(base);
+    return NG_OK;
+}
+ng_status ng_graphsage(const ng_graph* g,
+                       ng_direction direction,
+                       ng_symbol_id type,
+                       uint32_t iterations,
+                       size_t input_dimensions,
+                       size_t output_dimensions,
+                       const double* features,
+                       uint64_t seed,
+                       double* out,
+                       size_t capacity,
+                       size_t* out_count) {
+    double* current;
+    double* aggregate;
+    double* next;
+    size_t current_dimensions, max_dimensions, total, i, j, d, k;
+    ng_status s;
+    if (!g || direction > NG_DIRECTION_EITHER || !iterations || !input_dimensions ||
+        !output_dimensions || !features || !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    if (input_dimensions > SIZE_MAX / (g->nn ? g->nn : 1) ||
+        output_dimensions > SIZE_MAX / (g->nn ? g->nn : 1))
+        return NG_LIMIT;
+    max_dimensions = input_dimensions > output_dimensions ? input_dimensions : output_dimensions;
+    total = g->nn * output_dimensions;
+    if (capacity < total || (total && !out))
+        return NG_LIMIT;
+    s = ng_analytics_check_output(g, type, g->nn ? out : NULL, g->nn, out_count);
+    if (s != NG_OK)
+        return s;
+    current_dimensions = input_dimensions;
+    current = (double*)malloc(g->nn * current_dimensions * sizeof(*current));
+    aggregate = (double*)malloc(g->nn * max_dimensions * sizeof(*aggregate));
+    next = (double*)malloc(g->nn * output_dimensions * sizeof(*next));
+    if ((g->nn && (!current || !aggregate || !next))) {
+        free(current);
+        free(aggregate);
+        free(next);
+        return NG_OOM;
+    }
+    if (g->nn)
+        memcpy(current, features, g->nn * current_dimensions * sizeof(*current));
+    for (k = 0; k < iterations; k++) {
+        size_t next_dimensions = output_dimensions;
+        for (i = 0; i < g->nn; i++) {
+            size_t count = 1;
+            for (d = 0; d < current_dimensions; d++)
+                aggregate[i * current_dimensions + d] = current[i * current_dimensions + d];
+            for (j = 0; j < g->nr; j++) {
+                const rel_i* rel = &g->re[j];
+                size_t other = SIZE_MAX;
+                if (!ng_analytics_rel_ok(rel, type))
+                    continue;
+                if ((direction == NG_DIRECTION_OUTGOING || direction == NG_DIRECTION_EITHER) &&
+                    ng_node_position(g, rel->src) == i)
+                    other = ng_node_position(g, rel->dst);
+                else if ((direction == NG_DIRECTION_INCOMING || direction == NG_DIRECTION_EITHER) &&
+                         ng_node_position(g, rel->dst) == i)
+                    other = ng_node_position(g, rel->src);
+                if (other == SIZE_MAX)
+                    continue;
+                for (d = 0; d < current_dimensions; d++)
+                    aggregate[i * current_dimensions + d] += current[other * current_dimensions + d];
+                count++;
+            }
+            for (d = 0; d < current_dimensions; d++)
+                aggregate[i * current_dimensions + d] /= (double)count;
+        }
+        for (i = 0; i < g->nn; i++) {
+            for (d = 0; d < next_dimensions; d++) {
+                double value = 0.0;
+                for (j = 0; j < current_dimensions; j++) {
+                    uint64_t random = ng_embedding_random(
+                        seed + k * UINT64_C(7046029254386353131) +
+                        j * UINT64_C(1315423911) + d * UINT64_C(2654435761));
+                    double weight = (double)(random % 2001) / 1000.0 - 1.0;
+                    value += aggregate[i * current_dimensions + j] * weight;
+                }
+                next[i * next_dimensions + d] = tanh(value / sqrt((double)current_dimensions));
+            }
+        }
+        if (k + 1 < iterations) {
+            double* resized = (double*)realloc(current, g->nn * next_dimensions * sizeof(*current));
+            if (g->nn && !resized) {
+                free(current);
+                free(aggregate);
+                free(next);
+                return NG_OOM;
+            }
+            current = resized;
+        }
+        if (g->nn)
+            memcpy(current, next, g->nn * next_dimensions * sizeof(*current));
+        current_dimensions = next_dimensions;
+    }
+    if (total)
+        memcpy(out, current, total * sizeof(*out));
+    free(current);
+    free(aggregate);
+    free(next);
+    return NG_OK;
+}
+static size_t ng_graphsage_layer_input(const ng_graphsage_model* model, size_t layer) {
+    return layer == 0 ? model->input_dimensions : model->output_dimensions;
+}
+static void ng_graphsage_model_release(ng_graphsage_model* model) {
+    size_t i;
+    if (!model)
+        return;
+    for (i = 0; i < model->layers; i++) {
+        free(model->weights[i]);
+        free(model->biases[i]);
+    }
+    free(model->weights);
+    free(model->biases);
+    free(model);
+}
+ng_status ng_graphsage_model_create(const ng_graphsage_config* config,
+                                    ng_graphsage_model** out) {
+    ng_graphsage_model* model;
+    size_t i, j, input, count;
+    if (!config || !out || !config->layers || !config->input_dimensions ||
+        !config->output_dimensions || config->normalize_features < 0 ||
+        config->normalize_features > 1)
+        return NG_INVALID_ARGUMENT;
+    model = (ng_graphsage_model*)calloc(1, sizeof(*model));
+    if (!model)
+        return NG_OOM;
+    model->layers = config->layers;
+    model->input_dimensions = config->input_dimensions;
+    model->output_dimensions = config->output_dimensions;
+    model->neighborhood_sample = config->neighborhood_sample;
+    model->normalize_features = config->normalize_features;
+    model->seed = config->seed;
+    model->weights = (double**)calloc(model->layers, sizeof(*model->weights));
+    model->biases = (double**)calloc(model->layers, sizeof(*model->biases));
+    if (!model->weights || !model->biases) {
+        ng_graphsage_model_release(model);
+        return NG_OOM;
+    }
+    for (i = 0; i < model->layers; i++) {
+        input = ng_graphsage_layer_input(model, i);
+        if (input > SIZE_MAX / model->output_dimensions) {
+            ng_graphsage_model_release(model);
+            return NG_LIMIT;
+        }
+        count = input * model->output_dimensions;
+        model->weights[i] = (double*)malloc(count * sizeof(double));
+        model->biases[i] = (double*)calloc(model->output_dimensions, sizeof(double));
+        if ((count && !model->weights[i]) || !model->biases[i]) {
+            ng_graphsage_model_release(model);
+            return NG_OOM;
+        }
+        for (j = 0; j < count; j++)
+            model->weights[i][j] =
+                ((double)(ng_embedding_random(model->seed + i * UINT64_C(7046029254386353131) + j) %
+                          2001) /
+                     1000.0 - 1.0) /
+                sqrt((double)input);
+    }
+    *out = model;
+    return NG_OK;
+}
+void ng_graphsage_model_free(ng_graphsage_model* model) {
+    ng_graphsage_model_release(model);
+}
+static void ng_graphsage_normalize(const double* input,
+                                   size_t count,
+                                   size_t dimensions,
+                                   double* output) {
+    size_t i, d;
+    for (d = 0; d < dimensions; d++) {
+        double mean = 0.0, variance = 0.0;
+        for (i = 0; i < count; i++)
+            mean += input[i * dimensions + d];
+        if (count)
+            mean /= (double)count;
+        for (i = 0; i < count; i++) {
+            double delta = input[i * dimensions + d] - mean;
+            variance += delta * delta;
+        }
+        variance = count ? sqrt(variance / (double)count) : 1.0;
+        if (variance < 1e-12)
+            variance = 1.0;
+        for (i = 0; i < count; i++)
+            output[i * dimensions + d] = (input[i * dimensions + d] - mean) / variance;
+    }
+}
+static ng_status ng_graphsage_aggregate(const ng_graph* g,
+                                        ng_direction direction,
+                                        ng_symbol_id type,
+                                        size_t sample,
+                                        const double* current,
+                                        size_t dimensions,
+                                        double* aggregate) {
+    size_t i, j, d;
+    for (i = 0; i < g->nn; i++) {
+        size_t* neighbors = NULL;
+        size_t count = 0, limit, start = 0;
+        for (j = 0; j < g->nr; j++) {
+            const rel_i* rel = &g->re[j];
+            if (!ng_analytics_rel_ok(rel, type))
+                continue;
+            if (((direction == NG_DIRECTION_OUTGOING || direction == NG_DIRECTION_EITHER) &&
+                 ng_node_position(g, rel->src) == i) ||
+                ((direction == NG_DIRECTION_INCOMING || direction == NG_DIRECTION_EITHER) &&
+                 ng_node_position(g, rel->dst) == i))
+                count++;
+        }
+        limit = sample && count > sample ? sample : count;
+        if (count) {
+            size_t n = 0;
+            neighbors = (size_t*)malloc(count * sizeof(*neighbors));
+            if (!neighbors)
+                return NG_OOM;
+            for (j = 0; j < g->nr; j++) {
+                const rel_i* rel = &g->re[j];
+                size_t other = SIZE_MAX;
+                if (!ng_analytics_rel_ok(rel, type))
+                    continue;
+                if ((direction == NG_DIRECTION_OUTGOING || direction == NG_DIRECTION_EITHER) &&
+                    ng_node_position(g, rel->src) == i)
+                    other = ng_node_position(g, rel->dst);
+                else if ((direction == NG_DIRECTION_INCOMING || direction == NG_DIRECTION_EITHER) &&
+                         ng_node_position(g, rel->dst) == i)
+                    other = ng_node_position(g, rel->src);
+                if (other != SIZE_MAX)
+                    neighbors[n++] = other;
+            }
+            start = (size_t)(ng_embedding_random((uint64_t)i + dimensions) % count);
+        }
+        for (d = 0; d < dimensions; d++)
+            aggregate[i * dimensions + d] = current[i * dimensions + d];
+        for (j = 0; j < limit; j++) {
+            size_t other = neighbors[(start + j) % count];
+            for (d = 0; d < dimensions; d++)
+                aggregate[i * dimensions + d] += current[other * dimensions + d];
+        }
+        for (d = 0; d < dimensions; d++)
+            aggregate[i * dimensions + d] /= (double)(limit + 1);
+        free(neighbors);
+    }
+    return NG_OK;
+}
+ng_status ng_graphsage_model_infer(const ng_graphsage_model* model,
+                                   const ng_graph* g,
+                                   ng_direction direction,
+                                   ng_symbol_id type,
+                                   const double* features,
+                                   double* out,
+                                   size_t capacity,
+                                   size_t* out_count) {
+    double *current = NULL, *normalized = NULL, *aggregate = NULL, *next = NULL;
+    size_t current_dimensions, max_dimensions, total, i, j, d, layer;
+    ng_status status = NG_OK;
+    if (!model || !g || !features || direction > NG_DIRECTION_EITHER ||
+        !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    if (model->input_dimensions > SIZE_MAX / (g->nn ? g->nn : 1) ||
+        model->output_dimensions > SIZE_MAX / (g->nn ? g->nn : 1))
+        return NG_LIMIT;
+    max_dimensions = model->input_dimensions > model->output_dimensions
+                         ? model->input_dimensions
+                         : model->output_dimensions;
+    total = g->nn * model->output_dimensions;
+    if (capacity < total || (total && !out))
+        return NG_LIMIT;
+    status = ng_analytics_check_output(g, type, g->nn ? out : NULL, g->nn, out_count);
+    if (status != NG_OK)
+        return status;
+    current_dimensions = model->input_dimensions;
+    current = (double*)malloc(g->nn * max_dimensions * sizeof(*current));
+    normalized = model->normalize_features ?
+        (double*)malloc(g->nn * current_dimensions * sizeof(*normalized)) : NULL;
+    aggregate = (double*)malloc(g->nn * model->output_dimensions * sizeof(*aggregate));
+    next = (double*)malloc(g->nn * model->output_dimensions * sizeof(*next));
+    if (g->nn && (!current || (model->normalize_features && !normalized) || !aggregate || !next)) {
+        status = NG_OOM;
+        goto finish;
+    }
+    if (g->nn) {
+        if (model->normalize_features) {
+            ng_graphsage_normalize(features, g->nn, current_dimensions, normalized);
+            memcpy(current, normalized, g->nn * current_dimensions * sizeof(*current));
+        } else
+            memcpy(current, features, g->nn * current_dimensions * sizeof(*current));
+    }
+    for (layer = 0; layer < model->layers; layer++) {
+        status = ng_graphsage_aggregate(g, direction, type, model->neighborhood_sample,
+                                        current, current_dimensions, aggregate);
+        if (status != NG_OK)
+            goto finish;
+        for (i = 0; i < g->nn; i++)
+            for (d = 0; d < model->output_dimensions; d++) {
+                double value = model->biases[layer][d];
+                for (j = 0; j < current_dimensions; j++)
+                    value += aggregate[i * current_dimensions + j] *
+                             model->weights[layer][j * model->output_dimensions + d];
+                next[i * model->output_dimensions + d] = tanh(value);
+            }
+        if (layer + 1 < model->layers) {
+            memcpy(current, next, g->nn * model->output_dimensions * sizeof(*current));
+            current_dimensions = model->output_dimensions;
+        }
+    }
+    if (total)
+        memcpy(out, next, total * sizeof(*out));
+finish:
+    free(current);
+    free(normalized);
+    free(aggregate);
+    free(next);
+    return status;
+}
+static double ng_graphsage_loss(const ng_graphsage_model* model,
+                                const ng_graph* g,
+                                ng_direction direction,
+                                ng_symbol_id type,
+                                const double* features,
+                                const double* targets,
+                                double* prediction) {
+    size_t i, total = g->nn * model->output_dimensions;
+    double loss = 0.0;
+    if (ng_graphsage_model_infer(model, g, direction, type, features, prediction, total, NULL) != NG_OK)
+        return -1.0;
+    for (i = 0; i < total; i++) {
+        double delta = prediction[i] - targets[i];
+        loss += delta * delta;
+    }
+    return total ? loss / (double)total : 0.0;
+}
+ng_status ng_graphsage_model_train(ng_graphsage_model* model,
+                                   const ng_graph* g,
+                                   ng_direction direction,
+                                   ng_symbol_id type,
+                                   const double* features,
+                                   const double* targets,
+                                   uint32_t epochs,
+                                   double learning_rate,
+                                   double* out_loss) {
+    double* prediction;
+    size_t epoch, layer, j, input, count;
+    const double epsilon = 0.0001;
+    if (!model || !g || !features || !targets || !epochs || learning_rate <= 0.0 ||
+        direction > NG_DIRECTION_EITHER || !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    if (model->output_dimensions > SIZE_MAX / (g->nn ? g->nn : 1))
+        return NG_LIMIT;
+    prediction = (double*)malloc(g->nn * model->output_dimensions * sizeof(*prediction));
+    if (g->nn && !prediction)
+        return NG_OOM;
+    for (epoch = 0; epoch < epochs; epoch++) {
+        for (layer = 0; layer < model->layers; layer++) {
+            input = ng_graphsage_layer_input(model, layer);
+            count = input * model->output_dimensions;
+            for (j = 0; j < count; j++) {
+                double plus, minus;
+                model->weights[layer][j] += epsilon;
+                plus = ng_graphsage_loss(model, g, direction, type, features, targets, prediction);
+                model->weights[layer][j] -= 2.0 * epsilon;
+                minus = ng_graphsage_loss(model, g, direction, type, features, targets, prediction);
+                model->weights[layer][j] += epsilon;
+                if (plus < 0.0 || minus < 0.0) {
+                    free(prediction);
+                    return NG_INVALID_ARGUMENT;
+                }
+                model->weights[layer][j] -= learning_rate * (plus - minus) / (2.0 * epsilon);
+            }
+            for (j = 0; j < model->output_dimensions; j++) {
+                double plus, minus;
+                model->biases[layer][j] += epsilon;
+                plus = ng_graphsage_loss(model, g, direction, type, features, targets, prediction);
+                model->biases[layer][j] -= 2.0 * epsilon;
+                minus = ng_graphsage_loss(model, g, direction, type, features, targets, prediction);
+                model->biases[layer][j] += epsilon;
+                model->biases[layer][j] -= learning_rate * (plus - minus) / (2.0 * epsilon);
+            }
+        }
+    }
+    if (out_loss)
+        *out_loss = ng_graphsage_loss(model, g, direction, type, features, targets, prediction);
+    free(prediction);
+    return NG_OK;
+}
+static int ng_graphsage_write(FILE* file, const void* data, size_t size) {
+    return fwrite(data, 1, size, file) == size;
+}
+ng_status ng_graphsage_model_save(const ng_graphsage_model* model, const char* path) {
+    FILE* file;
+    uint64_t magic = UINT64_C(0x4e47534147455331);
+    size_t i;
+    if (!model || !path)
+        return NG_INVALID_ARGUMENT;
+    file = fopen(path, "wb");
+    if (!file)
+        return NG_IO_ERROR;
+    if (!ng_graphsage_write(file, &magic, sizeof(magic)) ||
+        !ng_graphsage_write(file, &model->layers, sizeof(model->layers)) ||
+        !ng_graphsage_write(file, &model->input_dimensions, sizeof(model->input_dimensions)) ||
+        !ng_graphsage_write(file, &model->output_dimensions, sizeof(model->output_dimensions)) ||
+        !ng_graphsage_write(file, &model->neighborhood_sample, sizeof(model->neighborhood_sample)) ||
+        !ng_graphsage_write(file, &model->normalize_features, sizeof(model->normalize_features)) ||
+        !ng_graphsage_write(file, &model->seed, sizeof(model->seed))) {
+        fclose(file);
+        return NG_IO_ERROR;
+    }
+    for (i = 0; i < model->layers; i++) {
+        size_t input = ng_graphsage_layer_input(model, i);
+        if (!ng_graphsage_write(file, model->weights[i], input * model->output_dimensions * sizeof(double)) ||
+            !ng_graphsage_write(file, model->biases[i], model->output_dimensions * sizeof(double))) {
+            fclose(file);
+            return NG_IO_ERROR;
+        }
+    }
+    return fclose(file) == 0 ? NG_OK : NG_IO_ERROR;
+}
+ng_status ng_graphsage_model_load(const char* path, ng_graphsage_model** out) {
+    FILE* file;
+    uint64_t magic;
+    ng_graphsage_config config;
+    ng_graphsage_model* model = NULL;
+    size_t i;
+    if (!path || !out)
+        return NG_INVALID_ARGUMENT;
+    file = fopen(path, "rb");
+    if (!file)
+        return NG_IO_ERROR;
+    if (fread(&magic, sizeof(magic), 1, file) != 1 || magic != UINT64_C(0x4e47534147455331) ||
+        fread(&config.layers, sizeof(config.layers), 1, file) != 1 ||
+        fread(&config.input_dimensions, sizeof(config.input_dimensions), 1, file) != 1 ||
+        fread(&config.output_dimensions, sizeof(config.output_dimensions), 1, file) != 1 ||
+        fread(&config.neighborhood_sample, sizeof(config.neighborhood_sample), 1, file) != 1 ||
+        fread(&config.normalize_features, sizeof(config.normalize_features), 1, file) != 1 ||
+        fread(&config.seed, sizeof(config.seed), 1, file) != 1) {
+        fclose(file);
+        return NG_CORRUPT;
+    }
+    if (ng_graphsage_model_create(&config, &model) != NG_OK) {
+        fclose(file);
+        return NG_OOM;
+    }
+    for (i = 0; i < model->layers; i++) {
+        size_t input = ng_graphsage_layer_input(model, i);
+        if (fread(model->weights[i], input * model->output_dimensions * sizeof(double), 1, file) != 1 ||
+            fread(model->biases[i], model->output_dimensions * sizeof(double), 1, file) != 1) {
+            ng_graphsage_model_release(model);
+            fclose(file);
+            return NG_CORRUPT;
+        }
+    }
+    fclose(file);
+    *out = model;
+    return NG_OK;
+}
+ng_status ng_vector_search_cosine(const double* vectors,
+                                  size_t vector_count,
+                                  size_t dimensions,
+                                  const double* query,
+                                  size_t k,
+                                  ng_vector_score* out,
+                                  size_t capacity,
+                                  size_t* out_count) {
+    size_t i, d, count = 0;
+    if (!vectors || !dimensions || !query || !k || capacity < k || !out)
+        return NG_INVALID_ARGUMENT;
+    for (i = 0; i < vector_count; i++) {
+        double dot = 0.0, norm = 0.0, qnorm = 0.0, score;
+        for (d = 0; d < dimensions; d++) {
+            double value = vectors[i * dimensions + d];
+            dot += value * query[d];
+            norm += value * value;
+            qnorm += query[d] * query[d];
+        }
+        score = norm > 0.0 && qnorm > 0.0 ? dot / sqrt(norm * qnorm) : 0.0;
+        if (count < k)
+            out[count++] = (ng_vector_score){i, score};
+        else {
+            size_t worst = 0;
+            for (d = 1; d < count; d++)
+                if (out[d].score < out[worst].score)
+                    worst = d;
+            if (score > out[worst].score)
+                out[worst] = (ng_vector_score){i, score};
+        }
+    }
+    for (i = 0; i < count; i++)
+        for (d = i + 1; d < count; d++)
+            if (out[d].score > out[i].score) {
+                ng_vector_score tmp = out[i];
+                out[i] = out[d];
+                out[d] = tmp;
+            }
+    if (out_count)
+        *out_count = count;
+    return NG_OK;
+}
+static ng_status ng_distance_centrality(const ng_graph* g,
+                                        ng_direction direction,
+                                        ng_symbol_id type,
+                                        int harmonic,
+                                        ng_node_score* out,
+                                        size_t capacity,
+                                        size_t* out_count) {
+    size_t i, j;
+    ng_status s;
+    if (!g || direction > NG_DIRECTION_EITHER)
+        return NG_INVALID_ARGUMENT;
+    s = ng_analytics_check_output(g, type, out, capacity, out_count);
+    if (s != NG_OK)
+        return s;
+    for (i = 0; i < g->nn; i++) {
+        size_t* distances = (size_t*)malloc(g->nn * sizeof(*distances));
+        size_t* queue = (size_t*)malloc(g->nn * sizeof(*queue));
+        size_t head = 0, tail = 0, reachable = 0;
+        double total = 0.0;
+        if ((g->nn && !distances) || (g->nn && !queue)) {
+            free(distances);
+            free(queue);
+            return NG_OOM;
+        }
+        for (j = 0; j < g->nn; j++)
+            distances[j] = SIZE_MAX;
+        distances[i] = 0;
+        queue[tail++] = i;
+        while (head < tail) {
+            size_t current = queue[head++];
+            for (j = 0; j < g->nr; j++) {
+                const rel_i* rel = &g->re[j];
+                size_t next = SIZE_MAX;
+                if (!ng_analytics_rel_ok(rel, type))
+                    continue;
+                if (direction == NG_DIRECTION_OUTGOING && rel->src == g->no[current].id)
+                    next = ng_node_position(g, rel->dst);
+                else if (direction == NG_DIRECTION_INCOMING && rel->dst == g->no[current].id)
+                    next = ng_node_position(g, rel->src);
+                else if (direction == NG_DIRECTION_EITHER) {
+                    if (rel->src == g->no[current].id)
+                        next = ng_node_position(g, rel->dst);
+                    else if (rel->dst == g->no[current].id)
+                        next = ng_node_position(g, rel->src);
+                }
+                if (next != SIZE_MAX && distances[next] == SIZE_MAX) {
+                    distances[next] = distances[current] + 1;
+                    queue[tail++] = next;
+                }
+            }
+        }
+        for (j = 0; j < g->nn; j++)
+            if (j != i && distances[j] != SIZE_MAX) {
+                reachable++;
+                total += harmonic ? 1.0 / (double)distances[j] : (double)distances[j];
+            }
+        out[i].node = g->no[i].id;
+        out[i].score = total == 0.0 ? 0.0
+                                   : (harmonic ? total
+                                               : (double)reachable / total);
+        free(distances);
+        free(queue);
+    }
+    return NG_OK;
+}
+ng_status ng_closeness_centrality(const ng_graph* g,
+                                  ng_direction direction,
+                                  ng_symbol_id type,
+                                  ng_node_score* out,
+                                  size_t capacity,
+                                  size_t* out_count) {
+    return ng_distance_centrality(g, direction, type, 0, out, capacity, out_count);
+}
+ng_status ng_harmonic_centrality(const ng_graph* g,
+                                 ng_direction direction,
+                                 ng_symbol_id type,
+                                 ng_node_score* out,
+                                 size_t capacity,
+                                 size_t* out_count) {
+    return ng_distance_centrality(g, direction, type, 1, out, capacity, out_count);
 }
 ng_status ng_weakly_connected_components(const ng_graph* g,
                                          ng_symbol_id type,
@@ -1800,6 +3408,410 @@ ng_status ng_preferential_attachment(
     if (s != NG_OK)
         return s;
     *out = (uint64_t)ca * (uint64_t)cb;
+    return NG_OK;
+}
+static ng_status ng_link_prediction_score(const ng_graph* g,
+                                          ng_node_id a,
+                                          ng_node_id b,
+                                          ng_symbol_id type,
+                                          int adamic,
+                                          double* out) {
+    size_t pa, pb, *na = NULL, *nb = NULL, ca = 0, cb = 0, i;
+    double score = 0.0;
+    ng_status s;
+    if (!g || !out)
+        return NG_INVALID_ARGUMENT;
+    if (!ng_analytics_symbol_ok(g, type))
+        return NG_NOT_FOUND;
+    pa = ng_node_position(g, a);
+    pb = ng_node_position(g, b);
+    if (pa == SIZE_MAX || pb == SIZE_MAX)
+        return NG_NOT_FOUND;
+    s = ng_analytics_neighbors(g, pa, type, &na, &ca);
+    if (s == NG_OK)
+        s = ng_analytics_neighbors(g, pb, type, &nb, &cb);
+    if (s != NG_OK) {
+        free(na);
+        free(nb);
+        return s;
+    }
+    for (i = 0; i < ca; i++) {
+        size_t degree = 0, *common_neighbors = NULL;
+        if (!ng_analytics_has_size(nb, cb, na[i]))
+            continue;
+        s = ng_analytics_neighbors(g, na[i], type, &common_neighbors, &degree);
+        if (s != NG_OK) {
+            free(na);
+            free(nb);
+            return s;
+        }
+        free(common_neighbors);
+        if (degree > 0)
+            score += adamic ? (degree > 1 ? 1.0 / log((double)degree) : 0.0)
+                            : 1.0 / (double)degree;
+    }
+    free(na);
+    free(nb);
+    *out = score;
+    return NG_OK;
+}
+ng_status ng_adamic_adar(const ng_graph* g,
+                         ng_node_id a,
+                         ng_node_id b,
+                         ng_symbol_id type,
+                         double* out) {
+    return ng_link_prediction_score(g, a, b, type, 1, out);
+}
+ng_status ng_resource_allocation(const ng_graph* g,
+                                 ng_node_id a,
+                                 ng_node_id b,
+                                 ng_symbol_id type,
+                                 double* out) {
+    return ng_link_prediction_score(g, a, b, type, 0, out);
+}
+static void ng_articulation_visit(const ng_graph* g,
+                                  size_t current,
+                                  ng_symbol_id type,
+                                  size_t parent_edge,
+                                  size_t* clock,
+                                  size_t* discovery,
+                                  size_t* low,
+                                  unsigned char* points,
+                                  unsigned char* bridge) {
+    size_t i, children = 0;
+    discovery[current] = low[current] = ++*clock;
+    for (i = 0; i < g->nr; i++) {
+        const rel_i* rel = &g->re[i];
+        size_t next = SIZE_MAX;
+        if (i == parent_edge || !ng_analytics_rel_ok(rel, type))
+            continue;
+        if (rel->src == g->no[current].id)
+            next = ng_node_position(g, rel->dst);
+        else if (rel->dst == g->no[current].id)
+            next = ng_node_position(g, rel->src);
+        if (next == SIZE_MAX)
+            continue;
+        if (!discovery[next]) {
+            children++;
+            ng_articulation_visit(g,
+                                  next,
+                                  type,
+                                  i,
+                                  clock,
+                                  discovery,
+                                  low,
+                                  points,
+                                  bridge);
+            if (low[next] < low[current])
+                low[current] = low[next];
+            if (parent_edge != SIZE_MAX && low[next] >= discovery[current])
+                points[current] = 1;
+            if (low[next] > discovery[current])
+                bridge[i] = 1;
+        } else if (discovery[next] < low[current]) {
+            low[current] = discovery[next];
+        }
+    }
+    if (parent_edge == SIZE_MAX && children > 1)
+        points[current] = 1;
+}
+ng_status ng_articulation_points(const ng_graph* g,
+                                 ng_symbol_id type,
+                                 ng_node_id* out,
+                                 size_t capacity,
+                                 size_t* out_count) {
+    size_t* discovery;
+    size_t* low;
+    unsigned char* points;
+    unsigned char* bridge;
+    size_t clock = 0, count = 0, i;
+    if (!g || !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    discovery = (size_t*)calloc(g->nn, sizeof(*discovery));
+    low = (size_t*)calloc(g->nn, sizeof(*low));
+    points = (unsigned char*)calloc(g->nn, 1);
+    bridge = (unsigned char*)calloc(g->nr, 1);
+    if ((g->nn && (!discovery || !low || !points)) || (g->nr && !bridge)) {
+        free(discovery);
+        free(low);
+        free(points);
+        free(bridge);
+        return NG_OOM;
+    }
+    for (i = 0; i < g->nn; i++)
+        if (!discovery[i])
+            ng_articulation_visit(g,
+                                  i,
+                                  type,
+                                  SIZE_MAX,
+                                  &clock,
+                                  discovery,
+                                  low,
+                                  points,
+                                  bridge);
+    for (i = 0; i < g->nn; i++)
+        if (points[i]) {
+            if (!out || count >= capacity) {
+                free(discovery);
+                free(low);
+                free(points);
+                free(bridge);
+                return NG_LIMIT;
+            }
+            out[count++] = g->no[i].id;
+        }
+    if (out_count)
+        *out_count = count;
+    free(discovery);
+    free(low);
+    free(points);
+    free(bridge);
+    return NG_OK;
+}
+ng_status ng_bridges(const ng_graph* g,
+                     ng_symbol_id type,
+                     ng_relationship_id* out,
+                     size_t capacity,
+                     size_t* out_count) {
+    size_t* discovery;
+    size_t* low;
+    unsigned char* points;
+    unsigned char* bridge;
+    size_t clock = 0, count = 0, i;
+    if (!g || !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    discovery = (size_t*)calloc(g->nn, sizeof(*discovery));
+    low = (size_t*)calloc(g->nn, sizeof(*low));
+    points = (unsigned char*)calloc(g->nn, 1);
+    bridge = (unsigned char*)calloc(g->nr, 1);
+    if ((g->nn && (!discovery || !low || !points)) || (g->nr && !bridge)) {
+        free(discovery);
+        free(low);
+        free(points);
+        free(bridge);
+        return NG_OOM;
+    }
+    for (i = 0; i < g->nn; i++)
+        if (!discovery[i])
+            ng_articulation_visit(g,
+                                  i,
+                                  type,
+                                  SIZE_MAX,
+                                  &clock,
+                                  discovery,
+                                  low,
+                                  points,
+                                  bridge);
+    for (i = 0; i < g->nr; i++)
+        if (bridge[i]) {
+            if (!out || count >= capacity) {
+                free(discovery);
+                free(low);
+                free(points);
+                free(bridge);
+                return NG_LIMIT;
+            }
+            out[count++] = g->re[i].id;
+        }
+    if (out_count)
+        *out_count = count;
+    free(discovery);
+    free(low);
+    free(points);
+    free(bridge);
+    return NG_OK;
+}
+ng_status ng_minimum_spanning_tree(const ng_graph* g,
+                                   ng_symbol_id type,
+                                   ng_symbol_id weight_key,
+                                   ng_relationship_id* out,
+                                   size_t capacity,
+                                   size_t* out_count,
+                                   double* out_weight) {
+    typedef struct {
+        size_t index, source, target;
+        double weight;
+    } edge;
+    edge* edges;
+    size_t* parent;
+    size_t edge_count = 0, selected = 0, i, j;
+    double total = 0.0;
+    if (!g || !ng_analytics_symbol_ok(g, type) ||
+        (weight_key && !ng_analytics_symbol_ok(g, weight_key)))
+        return NG_INVALID_ARGUMENT;
+    edges = (edge*)calloc(g->nr ? g->nr : 1, sizeof(*edges));
+    parent = (size_t*)malloc(g->nn * sizeof(*parent));
+    if (!edges || (g->nn && !parent)) {
+        free(edges);
+        free(parent);
+        return NG_OOM;
+    }
+    for (i = 0; i < g->nn; i++)
+        parent[i] = i;
+    for (i = 0; i < g->nr; i++) {
+        const rel_i* rel = &g->re[i];
+        const prop* property;
+        size_t source, target;
+        double weight = 1.0;
+        if (!ng_analytics_rel_ok(rel, type))
+            continue;
+        source = ng_node_position(g, rel->src);
+        target = ng_node_position(g, rel->dst);
+        if (source == SIZE_MAX || target == SIZE_MAX)
+            continue;
+        if (weight_key) {
+            property = findprop(rel->p, rel->np, weight_key);
+            if (property) {
+                if (property->v.type == NG_VALUE_INT64)
+                    weight = (double)property->v.as.integer;
+                else if (property->v.type == NG_VALUE_DOUBLE)
+                    weight = property->v.as.real;
+                else {
+                    free(edges);
+                    free(parent);
+                    return NG_PARSE_ERROR;
+                }
+                if (weight < 0) {
+                    free(edges);
+                    free(parent);
+                    return NG_PARSE_ERROR;
+                }
+            }
+        }
+        edges[edge_count++] = (edge){i, source, target, weight};
+    }
+    for (i = 0; i < edge_count; i++)
+        for (j = i + 1; j < edge_count; j++)
+            if (edges[j].weight < edges[i].weight) {
+                edge swap = edges[i];
+                edges[i] = edges[j];
+                edges[j] = swap;
+            }
+    for (i = 0; i < edge_count; i++) {
+        size_t a = edges[i].source, b = edges[i].target;
+        while (parent[a] != a)
+            a = parent[a];
+        while (parent[b] != b)
+            b = parent[b];
+        if (a == b)
+            continue;
+        parent[a] = b;
+        if (!out || selected >= capacity) {
+            free(edges);
+            free(parent);
+            return NG_LIMIT;
+        }
+        out[selected++] = g->re[edges[i].index].id;
+        total += edges[i].weight;
+    }
+    if (out_count)
+        *out_count = selected;
+    if (out_weight)
+        *out_weight = total;
+    free(edges);
+    free(parent);
+    return NG_OK;
+}
+ng_status ng_max_flow(const ng_graph* g,
+                      ng_node_id source,
+                      ng_node_id target,
+                      ng_symbol_id type,
+                      ng_symbol_id capacity_key,
+                      double* out_flow) {
+    size_t source_pos, target_pos, i, j;
+    double* residual = NULL;
+    size_t* parent = NULL;
+    size_t* queue = NULL;
+    double flow = 0.0;
+    if (!g || !out_flow || source == target || !ng_analytics_symbol_ok(g, type) ||
+        (capacity_key && !ng_analytics_symbol_ok(g, capacity_key)))
+        return NG_INVALID_ARGUMENT;
+    source_pos = ng_node_position(g, source);
+    target_pos = ng_node_position(g, target);
+    if (source_pos == SIZE_MAX || target_pos == SIZE_MAX)
+        return NG_NOT_FOUND;
+    if (g->nn > SIZE_MAX / (g->nn ? g->nn : 1) ||
+        !(residual = (double*)calloc(g->nn * g->nn, sizeof(*residual))) ||
+        !(parent = (size_t*)malloc(g->nn * sizeof(*parent))) ||
+        !(queue = (size_t*)malloc(g->nn * sizeof(*queue)))) {
+        free(residual);
+        free(parent);
+        free(queue);
+        return NG_OOM;
+    }
+    for (i = 0; i < g->nr; i++) {
+        const rel_i* rel = &g->re[i];
+        const prop* property;
+        size_t a, b;
+        double capacity = 1.0;
+        if (!ng_analytics_rel_ok(rel, type))
+            continue;
+        a = ng_node_position(g, rel->src);
+        b = ng_node_position(g, rel->dst);
+        if (a == SIZE_MAX || b == SIZE_MAX)
+            continue;
+        if (capacity_key && (property = findprop(rel->p, rel->np, capacity_key))) {
+            if (property->v.type == NG_VALUE_INT64)
+                capacity = (double)property->v.as.integer;
+            else if (property->v.type == NG_VALUE_DOUBLE)
+                capacity = property->v.as.real;
+            else {
+                free(residual);
+                free(parent);
+                free(queue);
+                return NG_PARSE_ERROR;
+            }
+            if (capacity < 0) {
+                free(residual);
+                free(parent);
+                free(queue);
+                return NG_PARSE_ERROR;
+            }
+        }
+        residual[a * g->nn + b] += capacity;
+    }
+    for (;;) {
+        size_t head = 0, tail = 0;
+        double path_flow = 1e300;
+        unsigned char* visited = (unsigned char*)calloc(g->nn, 1);
+        if (g->nn && !visited) {
+            free(residual);
+            free(parent);
+            free(queue);
+            return NG_OOM;
+        }
+        for (i = 0; i < g->nn; i++)
+            parent[i] = SIZE_MAX;
+        visited[source_pos] = 1;
+        queue[tail++] = source_pos;
+        while (head < tail && !visited[target_pos]) {
+            size_t current = queue[head++];
+            for (j = 0; j < g->nn; j++)
+                if (!visited[j] && residual[current * g->nn + j] > 0.0) {
+                    visited[j] = 1;
+                    parent[j] = current;
+                    queue[tail++] = j;
+                }
+        }
+        if (!visited[target_pos]) {
+            free(visited);
+            break;
+        }
+        for (i = target_pos; i != source_pos; i = parent[i])
+            if (residual[parent[i] * g->nn + i] < path_flow)
+                path_flow = residual[parent[i] * g->nn + i];
+        for (i = target_pos; i != source_pos; i = parent[i]) {
+            size_t previous = parent[i];
+            residual[previous * g->nn + i] -= path_flow;
+            residual[i * g->nn + previous] += path_flow;
+        }
+        flow += path_flow;
+        free(visited);
+    }
+    *out_flow = flow;
+    free(residual);
+    free(parent);
+    free(queue);
     return NG_OK;
 }
 ng_status ng_topological_sort(
@@ -2635,7 +4647,7 @@ static ng_status ng_query_parse_value(const char** pp, ng_value* v) {
             scan++;
         while (isdigit((unsigned char)*scan))
             scan++;
-        if (*scan == '.' || *scan == 'e' || *scan == 'E') {
+        if ((*scan == '.' && scan[1] != '.') || *scan == 'e' || *scan == 'E') {
             char* end;
             double value = strtod(p, &end);
             if (end == p)
@@ -4150,6 +6162,7 @@ static ng_status ng_query_parse_prop_map(const char** pp, ng_query_prop* props, 
 #define NG_CY_MAX_MATCHES 8
 #define NG_CY_MAX_NODES 8
 #define NG_CY_MAX_RELS 7
+#define NG_CY_MAX_PATH_LENGTH 64
 #define NG_CY_MAX_RETURNS 8
 #define NG_CY_MAX_ROWS 4096
 #define NG_CY_MAX_SCALARS 32
@@ -4176,10 +6189,19 @@ typedef struct {
     ng_cy_node_pat nodes[NG_CY_MAX_NODES];
     ng_cy_rel_pat rels[NG_CY_MAX_RELS];
     size_t node_count, rel_count;
+    int path_var_index;
 } ng_cy_match;
+typedef struct {
+    ng_id nodes[NG_CY_MAX_PATH_LENGTH + 1];
+    ng_id relationships[NG_CY_MAX_PATH_LENGTH];
+    size_t node_count, relationship_count;
+} ng_cy_path;
 typedef struct {
     int kind, left, right, var_index, is_property, is_id, list_count, direct_binding,
         list_items[NG_QUERY_MAX_LIST_VALUES];
+    int slice_start, slice_end;
+    int comprehension_var, comprehension_source, comprehension_filter, comprehension_value;
+    int case_operand, case_simple;
     char key[128];
     ng_value value;
     size_t map_count;
@@ -4214,6 +6236,7 @@ typedef struct {
     ng_cy_scalar scalars[NG_CY_MAX_SCALARS];
     int term_count, expr_count, scalar_count, where_root, has_where, has_skip, has_limit, distinct,
         create_mode;
+    char merge_on_create[4096], merge_on_match[4096];
     uint64_t skip, limit;
 } ng_cy_query;
 typedef struct {
@@ -4223,6 +6246,7 @@ typedef struct {
     int kind;
     ng_id id;
     ng_value value;
+    void* pointer;
 } ng_cy_binding;
 typedef struct {
     ng_cy_binding values[NG_CY_MAX_VARS];
@@ -4245,6 +6269,15 @@ ng_cy_execute_create_match(ng_graph* g, ng_cy_query* q, const ng_cy_match* m, ng
 static ng_status ng_cy_parse_scalar_add(const char** pp, ng_cy_query* q, int* out);
 static ng_status ng_cy_eval_scalar(
     const ng_graph* g, const ng_cy_query* q, const ng_cy_row* row, int index, ng_value* out);
+static int ng_cy_scalar_temporary(const ng_cy_query* q, int index) {
+    int kind;
+    if (index < 0 || index >= q->scalar_count)
+        return 0;
+    kind = q->scalars[index].kind;
+    return kind == 2 || kind == 7 || kind == 8 || kind == 9 || kind == 10 || kind == 11 ||
+           kind == 16 || kind == 17 || kind == 19 || kind == 20 || kind == 21 || kind == 22 ||
+           kind == 23 || kind == 24 || kind == 25 || kind == 26;
+}
 static ng_status ng_cy_props_to_symbols_row(ng_graph* g,
                                             ng_cy_query* q,
                                             const ng_query_prop* props,
@@ -4548,6 +6581,20 @@ static ng_status ng_cy_parse_match_pattern(const char** pp, ng_cy_query* q, cons
     p = ng_skip_ws(p + k);
     m = &q->matches[q->match_count];
     memset(m, 0, sizeof(*m));
+    m->path_var_index = -1;
+    {
+        const char* path_end = p;
+        char path_name[64];
+        if (ng_cy_parse_ident(&path_end, path_name, sizeof(path_name)) == NG_OK) {
+            path_end = ng_skip_ws(path_end);
+            if (*path_end == '=') {
+                m->path_var_index = ng_cy_var_index(q, path_name, 4, 1);
+                if (m->path_var_index < 0)
+                    return NG_PARSE_ERROR;
+                p = ng_skip_ws(path_end + 1);
+            }
+        }
+    }
     if (ng_cy_parse_node(&p, q, &m->nodes[m->node_count++]) != NG_OK)
         return NG_PARSE_ERROR;
     for (;;) {
@@ -4801,7 +6848,7 @@ static int ng_cy_scalar_add(ng_cy_query* q,
     return i;
 }
 static ng_status ng_cy_parse_scalar_add(const char** pp, ng_cy_query* q, int* out);
-static ng_status ng_cy_parse_scalar_primary(const char** pp, ng_cy_query* q, int* out) {
+static ng_status ng_cy_parse_scalar_atom(const char** pp, ng_cy_query* q, int* out) {
     const char *p = ng_skip_ws(*pp), *s;
     char name[64], key[128];
     ng_value v;
@@ -4818,6 +6865,47 @@ static ng_status ng_cy_parse_scalar_primary(const char** pp, ng_cy_query* q, int
         return NG_OK;
     }
     if (*p == '[') {
+        const char* look = ng_skip_ws(p + 1);
+        char comprehension_name[64];
+        const char* after_name = look;
+        if (ng_cy_parse_ident(&after_name, comprehension_name, sizeof(comprehension_name)) == NG_OK &&
+            ng_skip_ws(after_name)[0] == 'I' &&
+            !strncmp(ng_skip_ws(after_name), "IN", 2) &&
+            isspace((unsigned char)ng_skip_ws(after_name)[2])) {
+            int comprehension = ng_cy_scalar_add(q, 11, -1, -1, -1, NULL, NULL);
+            int variable, source, filter = -1, value;
+            if (comprehension < 0 || ng_cy_var_lookup(q, comprehension_name) >= 0)
+                return NG_PARSE_ERROR;
+            variable = ng_cy_var_index(q, comprehension_name, 3, 1);
+            if (variable < 0)
+                return NG_PARSE_ERROR;
+            p = ng_skip_ws(after_name) + 2;
+            if (ng_cy_parse_scalar_add(&p, q, &source) != NG_OK)
+                return NG_PARSE_ERROR;
+            p = ng_skip_ws(p);
+            if (!strncmp(p, "WHERE", 5) && isspace((unsigned char)p[5])) {
+                p = ng_skip_ws(p + 5);
+                if (ng_cy_parse_or(&p, q, &filter) != NG_OK)
+                    return NG_PARSE_ERROR;
+                p = ng_skip_ws(p);
+            }
+            if (*p != '|')
+                return NG_PARSE_ERROR;
+            p = ng_skip_ws(p + 1);
+            if (ng_cy_parse_scalar_add(&p, q, &value) != NG_OK)
+                return NG_PARSE_ERROR;
+            p = ng_skip_ws(p);
+            if (*p != ']')
+                return NG_PARSE_ERROR;
+            q->vars[variable].in_scope = 0;
+            q->scalars[comprehension].comprehension_var = variable;
+            q->scalars[comprehension].comprehension_source = source;
+            q->scalars[comprehension].comprehension_filter = filter;
+            q->scalars[comprehension].comprehension_value = value;
+            *out = comprehension;
+            *pp = ng_skip_ws(p + 1);
+            return NG_OK;
+        }
         int list = ng_cy_scalar_add(q, 7, -1, -1, -1, NULL, NULL);
         if (list < 0)
             return NG_PARSE_ERROR;
@@ -4882,6 +6970,121 @@ static ng_status ng_cy_parse_scalar_primary(const char** pp, ng_cy_query* q, int
         *pp = ng_skip_ws(p + 1);
         return NG_OK;
     }
+    if (!strncmp(p, "CASE", 4) && isspace((unsigned char)p[4])) {
+        int expression = ng_cy_scalar_add(q, 20, -1, -1, -1, NULL, NULL);
+        int condition, value;
+        if (expression < 0)
+            return NG_PARSE_ERROR;
+        q->scalars[expression].case_operand = -1;
+        p = ng_skip_ws(p + 4);
+        if (strncmp(p, "WHEN", 4) || !isspace((unsigned char)p[4])) {
+            if (ng_cy_parse_scalar_add(&p, q, &condition) != NG_OK)
+                return NG_PARSE_ERROR;
+            q->scalars[expression].case_operand = condition;
+            q->scalars[expression].case_simple = 1;
+            p = ng_skip_ws(p);
+        }
+        while (!strncmp(p, "WHEN", 4) && isspace((unsigned char)p[4])) {
+            p = ng_skip_ws(p + 4);
+            if (q->scalars[expression].case_simple) {
+                if (ng_cy_parse_scalar_add(&p, q, &condition) != NG_OK)
+                    return NG_PARSE_ERROR;
+            } else if (ng_cy_parse_or(&p, q, &condition) != NG_OK)
+                return NG_PARSE_ERROR;
+            p = ng_skip_ws(p);
+            if (strncmp(p, "THEN", 4) || !isspace((unsigned char)p[4]))
+                return NG_PARSE_ERROR;
+            p = ng_skip_ws(p + 4);
+            if (ng_cy_parse_scalar_add(&p, q, &value) != NG_OK ||
+                q->scalars[expression].list_count + 2 > NG_QUERY_MAX_LIST_VALUES)
+                return NG_PARSE_ERROR;
+            q->scalars[expression].list_items[q->scalars[expression].list_count++] = condition;
+            q->scalars[expression].list_items[q->scalars[expression].list_count++] = value;
+            p = ng_skip_ws(p);
+        }
+        if (!q->scalars[expression].list_count)
+            return NG_PARSE_ERROR;
+        q->scalars[expression].slice_end = -1;
+        if (!strncmp(p, "ELSE", 4) && isspace((unsigned char)p[4])) {
+            p = ng_skip_ws(p + 4);
+            if (ng_cy_parse_scalar_add(&p, q, &value) != NG_OK)
+                return NG_PARSE_ERROR;
+            q->scalars[expression].slice_end = value;
+            p = ng_skip_ws(p);
+        }
+        if (strncmp(p, "END", 3) || (ng_ident_char((unsigned char)p[3])))
+            return NG_PARSE_ERROR;
+        *out = expression;
+        *pp = ng_skip_ws(p + 3);
+        return NG_OK;
+    }
+    if (ng_ident_char((unsigned char)*p) && !isdigit((unsigned char)*p)) {
+        const char* function_end = p;
+        char function[32];
+        int function_kind = 0, argument, arguments[NG_QUERY_MAX_LIST_VALUES];
+        size_t argument_count = 0;
+        if (ng_cy_parse_ident(&function_end, function, sizeof(function)) == NG_OK) {
+            function_end = ng_skip_ws(function_end);
+            if (*function_end == '(') {
+                if (!strcmp(function, "size"))
+                    function_kind = 13;
+                else if (!strcmp(function, "head"))
+                    function_kind = 14;
+                else if (!strcmp(function, "last"))
+                    function_kind = 15;
+                else if (!strcmp(function, "tail"))
+                    function_kind = 16;
+                else if (!strcmp(function, "reverse"))
+                    function_kind = 17;
+                else if (!strcmp(function, "toString"))
+                    function_kind = 18;
+                else if (!strcmp(function, "coalesce"))
+                    function_kind = 19;
+                else if (!strcmp(function, "nodes"))
+                    function_kind = 21;
+                else if (!strcmp(function, "relationships"))
+                    function_kind = 22;
+                else if (!strcmp(function, "toLower"))
+                    function_kind = 23;
+                else if (!strcmp(function, "toUpper"))
+                    function_kind = 24;
+                else if (!strcmp(function, "trim"))
+                    function_kind = 25;
+                else if (!strcmp(function, "abs"))
+                    function_kind = 26;
+                if (!function_kind && strcmp(function, "id"))
+                    return NG_PARSE_ERROR;
+                if (!function_kind)
+                    goto scalar_function_done;
+                p = ng_skip_ws(function_end + 1);
+                if (*p != ')') {
+                    for (;;) {
+                        if (argument_count >= NG_QUERY_MAX_LIST_VALUES ||
+                            ng_cy_parse_scalar_add(&p, q, &argument) != NG_OK)
+                            return NG_PARSE_ERROR;
+                        arguments[argument_count++] = argument;
+                        p = ng_skip_ws(p);
+                        if (*p != ',')
+                            break;
+                        p = ng_skip_ws(p + 1);
+                    }
+                }
+                if (*p != ')')
+                    return NG_PARSE_ERROR;
+                *out = ng_cy_scalar_add(q, function_kind, -1, -1, -1, NULL, NULL);
+                if (*out < 0)
+                    return NG_PARSE_ERROR;
+                q->scalars[*out].list_count = argument_count;
+                memcpy(q->scalars[*out].list_items,
+                       arguments,
+                       argument_count * sizeof(arguments[0]));
+                p = ng_skip_ws(p + 1);
+                *pp = p;
+                return NG_OK;
+            }
+        }
+    }
+scalar_function_done:
     if (!strncmp(p, "id(", 3)) {
         p = ng_skip_ws(p + 3);
         if (ng_cy_parse_ident(&p, name, sizeof(name)) != NG_OK)
@@ -4925,7 +7128,7 @@ static ng_status ng_cy_parse_scalar_primary(const char** pp, ng_cy_query* q, int
         memcpy(key, s, n);
         key[n] = 0;
     } else {
-        strcpy(key, q->vars[vi].kind == 3 ? "" : "id");
+        strcpy(key, (q->vars[vi].kind == 3 || q->vars[vi].kind == 4) ? "" : "id");
         direct_binding = q->vars[vi].kind == 1 || q->vars[vi].kind == 2;
     }
     *out = ng_cy_scalar_add(q, 1, -1, -1, vi, key, NULL);
@@ -4933,6 +7136,49 @@ static ng_status ng_cy_parse_scalar_primary(const char** pp, ng_cy_query* q, int
         return NG_PARSE_ERROR;
     q->scalars[*out].direct_binding = direct_binding;
     *pp = ng_skip_ws(p);
+    return NG_OK;
+}
+static ng_status ng_cy_parse_scalar_primary(const char** pp, ng_cy_query* q, int* out) {
+    const char* p;
+    int base;
+    if (ng_cy_parse_scalar_atom(pp, q, &base) != NG_OK)
+        return NG_PARSE_ERROR;
+    p = ng_skip_ws(*pp);
+    while (*p == '[') {
+        int start = -1, end = -1, index = -1, slice;
+        p = ng_skip_ws(p + 1);
+        if (*p != '.' || p[1] != '.') {
+            if (ng_cy_parse_scalar_add(&p, q, &start) != NG_OK)
+                return NG_PARSE_ERROR;
+        }
+        p = ng_skip_ws(p);
+        if (p[0] == '.' && p[1] == '.') {
+            p = ng_skip_ws(p + 2);
+            if (*p != ']') {
+                if (ng_cy_parse_scalar_add(&p, q, &end) != NG_OK)
+                    return NG_PARSE_ERROR;
+            }
+            p = ng_skip_ws(p);
+            slice = ng_cy_scalar_add(q, 10, base, -1, -1, NULL, NULL);
+            if (slice < 0)
+                return NG_PARSE_ERROR;
+            q->scalars[slice].slice_start = start;
+            q->scalars[slice].slice_end = end;
+            base = slice;
+        } else {
+            if (start < 0 || *p != ']')
+                return NG_PARSE_ERROR;
+            index = ng_cy_scalar_add(q, 9, base, start, -1, NULL, NULL);
+            if (index < 0)
+                return NG_PARSE_ERROR;
+            base = index;
+        }
+        if (*p != ']')
+            return NG_PARSE_ERROR;
+        p = ng_skip_ws(p + 1);
+    }
+    *out = base;
+    *pp = p;
     return NG_OK;
 }
 static ng_status ng_cy_parse_scalar_unary(const char** pp, ng_cy_query* q, int* out) {
@@ -5066,6 +7312,113 @@ static int ng_cy_bind(ng_cy_row* row, int var_index, int kind, ng_id id) {
     row->values[var_index].kind = kind;
     row->values[var_index].id = id;
     return 1;
+}
+static int ng_cy_bind_path(ng_cy_row* row, const ng_cy_match* m) {
+    ng_cy_path* path;
+    size_t i;
+    if (m->path_var_index < 0)
+        return 1;
+    path = (ng_cy_path*)calloc(1, sizeof(*path));
+    if (!path)
+        return 0;
+    path->node_count = m->node_count;
+    path->relationship_count = m->rel_count;
+    for (i = 0; i < m->node_count; i++) {
+        if (m->nodes[i].var_index < 0 || row->values[m->nodes[i].var_index].kind != 1) {
+            free(path);
+            return 0;
+        }
+        path->nodes[i] = row->values[m->nodes[i].var_index].id;
+    }
+    for (i = 0; i < m->rel_count; i++) {
+        if (m->rels[i].var_index < 0 || row->values[m->rels[i].var_index].kind != 2) {
+            free(path);
+            return 0;
+        }
+        path->relationships[i] = row->values[m->rels[i].var_index].id;
+    }
+    row->values[m->path_var_index].kind = 4;
+    row->values[m->path_var_index].pointer = path;
+    return 1;
+}
+static int ng_cy_path_append(ng_cy_row* row, int path_var_index, ng_id relationship, ng_id node_id) {
+    ng_cy_path* old_path;
+    ng_cy_path* path;
+    if (path_var_index < 0)
+        return 1;
+    if (row->values[path_var_index].kind != 4 || !row->values[path_var_index].pointer)
+        return 0;
+    old_path = (ng_cy_path*)row->values[path_var_index].pointer;
+    if (old_path->node_count >= NG_CY_MAX_PATH_LENGTH + 1 ||
+        old_path->relationship_count >= NG_CY_MAX_PATH_LENGTH)
+        return 0;
+    path = (ng_cy_path*)malloc(sizeof(*path));
+    if (!path)
+        return 0;
+    *path = *old_path;
+    path->relationships[path->relationship_count++] = relationship;
+    path->nodes[path->node_count++] = node_id;
+    row->values[path_var_index].pointer = path;
+    return 1;
+}
+static ng_status ng_cy_path_to_value(const ng_cy_path* path, ng_value* out) {
+    ng_value_map* map;
+    ng_value_list* node_list;
+    ng_value_list* relationship_list;
+    ng_value* nodes;
+    ng_value* relationships;
+    size_t i;
+    if (!path || !out)
+        return NG_INVALID_ARGUMENT;
+    map = (ng_value_map*)calloc(1, sizeof(*map));
+    if (!map || !(map->entries = (ng_value_map_entry*)calloc(2, sizeof(*map->entries)))) {
+        free(map);
+        return NG_OOM;
+    }
+    map->count = 2;
+    map->entries[0].key = dupstr("nodes");
+    map->entries[1].key = dupstr("relationships");
+    nodes = (ng_value*)calloc(path->node_count, sizeof(*nodes));
+    relationships = (ng_value*)calloc(path->relationship_count, sizeof(*relationships));
+    if (!map->entries[0].key || !map->entries[1].key ||
+        (path->node_count && !nodes) || (path->relationship_count && !relationships)) {
+        ng_value cleanup = {.type = NG_VALUE_MAP, .as.map = map};
+        free(nodes);
+        free(relationships);
+        valfree(&cleanup);
+        return NG_OOM;
+    }
+    for (i = 0; i < path->node_count; i++) {
+        nodes[i].type = NG_VALUE_INT64;
+        nodes[i].as.integer = (int64_t)path->nodes[i];
+    }
+    for (i = 0; i < path->relationship_count; i++) {
+        relationships[i].type = NG_VALUE_INT64;
+        relationships[i].as.integer = (int64_t)path->relationships[i];
+    }
+    map->entries[0].value.type = NG_VALUE_LIST;
+    map->entries[0].value.length = path->node_count;
+    node_list = (ng_value_list*)calloc(1, sizeof(*node_list));
+    relationship_list = (ng_value_list*)calloc(1, sizeof(*relationship_list));
+    map->entries[0].value.as.list = node_list;
+    map->entries[1].value.type = NG_VALUE_LIST;
+    map->entries[1].value.length = path->relationship_count;
+    map->entries[1].value.as.list = relationship_list;
+    if (!map->entries[0].value.as.list || !map->entries[1].value.as.list) {
+        ng_value cleanup = {.type = NG_VALUE_MAP, .as.map = map};
+        free(nodes);
+        free(relationships);
+        valfree(&cleanup);
+        return NG_OOM;
+    }
+    node_list->count = path->node_count;
+    node_list->items = nodes;
+    relationship_list->count = path->relationship_count;
+    relationship_list->items = relationships;
+    out->type = NG_VALUE_MAP;
+    out->length = 2;
+    out->as.map = map;
+    return NG_OK;
 }
 static int ng_cy_node_matches(const ng_graph* g, const node_i* n, const ng_cy_node_pat* p) {
     ng_symbol_id label;
@@ -5288,9 +7641,14 @@ static ng_status ng_cy_expand_var_rel(const ng_graph* g,
         if (seen[slot])
             continue;
         seen[slot] = 1;
-        if (ng_cy_expand_var_rel(g, q, m, pos, next, nd, row, seen, out, out_count, out_cap) !=
-            NG_OK)
-            return NG_OOM;
+        {
+            ng_cy_row nr = *row;
+            if (!ng_cy_path_append(&nr, m->path_var_index, r->id, next->id))
+                return NG_OOM;
+            if (ng_cy_expand_var_rel(g, q, m, pos, next, nd, &nr, seen, out, out_count, out_cap) !=
+                NG_OK)
+                return NG_OOM;
+        }
     }
     return NG_OK;
 }
@@ -5304,12 +7662,28 @@ static ng_status ng_cy_expand_from_node(const ng_graph* g,
                                         size_t* out_count,
                                         size_t* out_cap) {
     size_t i;
-    if (pos >= m->rel_count)
-        return ng_cy_append_row(out, out_count, out_cap, row) ? NG_OK : NG_OOM;
+    if (pos >= m->rel_count) {
+        ng_cy_row nr = *row;
+        if (m->path_var_index < 0 || nr.values[m->path_var_index].kind != 4) {
+            if (!ng_cy_bind_path(&nr, m))
+                return NG_OOM;
+        }
+        return ng_cy_append_row(out, out_count, out_cap, &nr) ? NG_OK : NG_OOM;
+    }
     if (m->rels[pos].has_var_length) {
         size_t start = ng_node_position(g, cur->id), cap;
+        ng_cy_row path_row = *row;
         if (start == SIZE_MAX)
             return NG_OK;
+        if (m->path_var_index >= 0) {
+            ng_cy_path* path = (ng_cy_path*)calloc(1, sizeof(*path));
+            if (!path)
+                return NG_OOM;
+            path->nodes[0] = cur->id;
+            path->node_count = 1;
+            path_row.values[m->path_var_index].kind = 4;
+            path_row.values[m->path_var_index].pointer = path;
+        }
         cap = g->nn * (size_t)(m->rels[pos].max_depth + 1);
         {
             unsigned char* seen = (unsigned char*)calloc(cap, 1);
@@ -5317,7 +7691,8 @@ static ng_status ng_cy_expand_from_node(const ng_graph* g,
             if (cap && !seen)
                 return NG_OOM;
             seen[start * (size_t)(m->rels[pos].max_depth + 1)] = 1;
-            s = ng_cy_expand_var_rel(g, q, m, pos, cur, 0, row, seen, out, out_count, out_cap);
+            s = ng_cy_expand_var_rel(
+                g, q, m, pos, cur, 0, &path_row, seen, out, out_count, out_cap);
             free(seen);
             return s;
         }
@@ -5349,6 +7724,9 @@ static ng_status ng_cy_expand_from_node(const ng_graph* g,
         if (!ng_cy_bind(&nr, m->rels[pos].var_index, 2, r->id) ||
             !ng_cy_bind(&nr, m->nodes[pos + 1].var_index, 1, next->id))
             continue;
+        if (m->path_var_index >= 0 && nr.values[m->path_var_index].kind == 4 &&
+            !ng_cy_path_append(&nr, m->path_var_index, r->id, next->id))
+            return NG_OOM;
         if (ng_cy_expand_from_node(g, q, m, pos + 1, next, &nr, out, out_count, out_cap) != NG_OK)
             return NG_OOM;
     }
@@ -5495,6 +7873,8 @@ static ng_status ng_cy_eval_scalar(
             *out = bind.value;
             return NG_OK;
         }
+        if (bind.kind == 4 && !s->key[0])
+            return ng_cy_path_to_value((const ng_cy_path*)bind.pointer, out);
         if (!strcmp(s->key, "id")) {
             out->type = NG_VALUE_INT64;
             out->length = 0;
@@ -5521,6 +7901,363 @@ static ng_status ng_cy_eval_scalar(
             return NG_OK;
         }
         *out = pr->v;
+        return NG_OK;
+    }
+    if (s->kind == 9 || s->kind == 10) {
+        ng_value base;
+        if (ng_cy_eval_scalar(g, q, row, s->left, &base) != NG_OK)
+            return NG_PARSE_ERROR;
+        if (base.type == NG_VALUE_NULL) {
+            out->type = NG_VALUE_NULL;
+            out->length = 0;
+        } else if (base.type != NG_VALUE_LIST || !base.as.list) {
+            if (ng_cy_scalar_temporary(q, s->left))
+                valfree(&base);
+            return NG_PARSE_ERROR;
+        } else if (s->kind == 9) {
+            int64_t index_value;
+            size_t position;
+            if (ng_cy_eval_scalar(g, q, row, s->right, &a) != NG_OK ||
+                a.type != NG_VALUE_INT64) {
+                if (ng_cy_scalar_temporary(q, s->left))
+                    valfree(&base);
+                return NG_PARSE_ERROR;
+            }
+            index_value = a.as.integer;
+            if (index_value < 0)
+                index_value += (int64_t)base.as.list->count;
+            if (index_value < 0 || (uint64_t)index_value >= base.as.list->count) {
+                out->type = NG_VALUE_NULL;
+                out->length = 0;
+            } else {
+                position = (size_t)index_value;
+                if (valcopy(out, &base.as.list->items[position]) != NG_OK) {
+                    if (ng_cy_scalar_temporary(q, s->left))
+                        valfree(&base);
+                    return NG_OOM;
+                }
+            }
+        } else {
+            int64_t first = s->slice_start < 0 ? 0 : 0, last;
+            ng_value bound;
+            ng_value_list* list;
+            size_t i, count;
+            if (s->slice_start >= 0) {
+                if (ng_cy_eval_scalar(g, q, row, s->slice_start, &bound) != NG_OK ||
+                    bound.type != NG_VALUE_INT64) {
+                    if (ng_cy_scalar_temporary(q, s->left))
+                        valfree(&base);
+                    return NG_PARSE_ERROR;
+                }
+                first = bound.as.integer;
+            }
+            last = (int64_t)base.as.list->count;
+            if (s->slice_end >= 0) {
+                if (ng_cy_eval_scalar(g, q, row, s->slice_end, &bound) != NG_OK ||
+                    bound.type != NG_VALUE_INT64) {
+                    if (ng_cy_scalar_temporary(q, s->left))
+                        valfree(&base);
+                    return NG_PARSE_ERROR;
+                }
+                last = bound.as.integer;
+            }
+            if (first < 0)
+                first += (int64_t)base.as.list->count;
+            if (last < 0)
+                last += (int64_t)base.as.list->count;
+            if (first < 0)
+                first = 0;
+            if (last < 0)
+                last = 0;
+            if ((uint64_t)first > base.as.list->count)
+                first = (int64_t)base.as.list->count;
+            if ((uint64_t)last > base.as.list->count)
+                last = (int64_t)base.as.list->count;
+            count = last > first ? (size_t)(last - first) : 0;
+            list = (ng_value_list*)calloc(1, sizeof(*list));
+            if (!list || (count && !(list->items = (ng_value*)calloc(count, sizeof(*list->items))))) {
+                free(list);
+                if (ng_cy_scalar_temporary(q, s->left))
+                    valfree(&base);
+                return NG_OOM;
+            }
+            list->count = count;
+            for (i = 0; i < count; i++)
+                if (valcopy(&list->items[i], &base.as.list->items[(size_t)first + i]) != NG_OK) {
+                    ng_value cleanup = {.type = NG_VALUE_LIST, .as.list = list};
+                    valfree(&cleanup);
+                    if (ng_cy_scalar_temporary(q, s->left))
+                        valfree(&base);
+                    return NG_OOM;
+                }
+            out->type = NG_VALUE_LIST;
+            out->length = count;
+            out->as.list = list;
+        }
+        if (ng_cy_scalar_temporary(q, s->left))
+            valfree(&base);
+        return NG_OK;
+    }
+    if (s->kind == 21 || s->kind == 22) {
+        ng_cy_binding binding;
+        ng_cy_path* path;
+        ng_value_list* list;
+        size_t i, count;
+        if (s->list_count != 1 || q->scalars[s->list_items[0]].kind != 1)
+            return NG_PARSE_ERROR;
+        binding = row->values[q->scalars[s->list_items[0]].var_index];
+        if (!binding.kind || binding.kind == 3) {
+            out->type = NG_VALUE_NULL;
+            out->length = 0;
+            return NG_OK;
+        }
+        if (binding.kind != 4 || !binding.pointer)
+            return NG_PARSE_ERROR;
+        path = (ng_cy_path*)binding.pointer;
+        count = s->kind == 21 ? path->node_count : path->relationship_count;
+        list = (ng_value_list*)calloc(1, sizeof(*list));
+        if (!list)
+            return NG_OOM;
+        list->count = count;
+        if (count && !(list->items = (ng_value*)calloc(count, sizeof(*list->items)))) {
+            free(list);
+            return NG_OOM;
+        }
+        for (i = 0; i < count; i++) {
+            list->items[i].type = NG_VALUE_INT64;
+            list->items[i].as.integer = (int64_t)(s->kind == 21 ? path->nodes[i]
+                                                                  : path->relationships[i]);
+        }
+        out->type = NG_VALUE_LIST;
+        out->length = count;
+        out->as.list = list;
+        return NG_OK;
+    }
+    if (s->kind >= 23 && s->kind <= 26) {
+        ng_value argument;
+        char* text;
+        size_t i, start, end;
+        if (s->list_count != 1 ||
+            ng_cy_eval_scalar(g, q, row, s->list_items[0], &argument) != NG_OK)
+            return NG_PARSE_ERROR;
+        if (argument.type == NG_VALUE_NULL) {
+            *out = argument;
+            return NG_OK;
+        }
+        if (s->kind == 26) {
+            if (argument.type == NG_VALUE_INT64) {
+                out->type = NG_VALUE_INT64;
+                out->as.integer = argument.as.integer < 0 ? -argument.as.integer : argument.as.integer;
+                out->length = 0;
+                return NG_OK;
+            }
+            if (argument.type == NG_VALUE_DOUBLE) {
+                out->type = NG_VALUE_DOUBLE;
+                out->as.real = argument.as.real < 0 ? -argument.as.real : argument.as.real;
+                out->length = 0;
+                return NG_OK;
+            }
+            return NG_PARSE_ERROR;
+        }
+        if (argument.type != NG_VALUE_STRING)
+            return NG_PARSE_ERROR;
+        start = 0;
+        end = argument.length;
+        if (s->kind == 25) {
+            while (start < end && isspace((unsigned char)argument.as.string[start]))
+                start++;
+            while (end > start && isspace((unsigned char)argument.as.string[end - 1]))
+                end--;
+        }
+        text = (char*)malloc(end - start + 1);
+        if (!text)
+            return NG_OOM;
+        for (i = start; i < end; i++)
+            text[i - start] = s->kind == 23
+                                   ? (char)tolower((unsigned char)argument.as.string[i])
+                                   : (s->kind == 24 ? (char)toupper((unsigned char)argument.as.string[i])
+                                                    : argument.as.string[i]);
+        text[end - start] = 0;
+        out->type = NG_VALUE_STRING;
+        out->length = end - start;
+        out->as.string = text;
+        return NG_OK;
+    }
+    if (s->kind >= 13 && s->kind <= 19) {
+        ng_value argument, result;
+        size_t argument_index, i;
+        if (s->kind == 18) {
+            FILE* text;
+            long length;
+            char* string;
+            if (s->list_count != 1 ||
+                ng_cy_eval_scalar(g, q, row, s->list_items[0], &argument) != NG_OK)
+                return NG_PARSE_ERROR;
+            text = tmpfile();
+            if (!text || !ng_print_value(text, &argument) || fflush(text) != 0 ||
+                fseek(text, 0, SEEK_END) != 0) {
+                if (text)
+                    fclose(text);
+                return NG_IO_ERROR;
+            }
+            length = ftell(text);
+            if (length < 0 || fseek(text, 0, SEEK_SET) != 0 ||
+                !(string = (char*)malloc((size_t)length + 1))) {
+                fclose(text);
+                return length < 0 ? NG_IO_ERROR : NG_OOM;
+            }
+            if (length && fread(string, 1, (size_t)length, text) != (size_t)length) {
+                free(string);
+                fclose(text);
+                return NG_IO_ERROR;
+            }
+            string[length] = 0;
+            fclose(text);
+            out->type = NG_VALUE_STRING;
+            out->length = (size_t)length;
+            out->as.string = string;
+            return NG_OK;
+        }
+        if (s->kind == 19) {
+            memset(out, 0, sizeof(*out));
+            out->type = NG_VALUE_NULL;
+            for (argument_index = 0; argument_index < (size_t)s->list_count; argument_index++) {
+                if (ng_cy_eval_scalar(g, q, row, s->list_items[argument_index], &result) != NG_OK)
+                    return NG_PARSE_ERROR;
+                if (result.type != NG_VALUE_NULL) {
+                    *out = result;
+                    return NG_OK;
+                }
+            }
+            return NG_OK;
+        }
+        if (s->list_count != 1 ||
+            ng_cy_eval_scalar(g, q, row, s->list_items[0], &argument) != NG_OK)
+            return NG_PARSE_ERROR;
+        if (s->kind == 13) {
+            if (argument.type == NG_VALUE_LIST && argument.as.list)
+                out->as.integer = (int64_t)argument.as.list->count;
+            else if (argument.type == NG_VALUE_MAP && argument.as.map)
+                out->as.integer = (int64_t)argument.as.map->count;
+            else if (argument.type == NG_VALUE_STRING)
+                out->as.integer = (int64_t)argument.length;
+            else if (argument.type == NG_VALUE_NULL) {
+                out->type = NG_VALUE_NULL;
+                out->length = 0;
+                return NG_OK;
+            } else
+                return NG_PARSE_ERROR;
+            out->type = NG_VALUE_INT64;
+            out->length = 0;
+            return NG_OK;
+        }
+        if (argument.type != NG_VALUE_LIST || !argument.as.list)
+            return argument.type == NG_VALUE_NULL ? (*out = argument, NG_OK) : NG_PARSE_ERROR;
+        if (s->kind == 14 || s->kind == 15) {
+            if (!argument.as.list->count) {
+                out->type = NG_VALUE_NULL;
+                out->length = 0;
+            } else {
+                i = s->kind == 14 ? 0 : argument.as.list->count - 1;
+                if (valcopy(out, &argument.as.list->items[i]) != NG_OK)
+                    return NG_OOM;
+            }
+            return NG_OK;
+        }
+        {
+            ng_value_list* list = (ng_value_list*)calloc(1, sizeof(*list));
+            if (!list)
+                return NG_OOM;
+            list->count = s->kind == 16 ? (argument.as.list->count ? argument.as.list->count - 1 : 0)
+                                         : argument.as.list->count;
+            if (list->count)
+                list->items = (ng_value*)calloc(list->count, sizeof(*list->items));
+            if (list->count && !list->items) {
+                free(list);
+                return NG_OOM;
+            }
+            for (i = 0; i < list->count; i++) {
+                size_t source = s->kind == 16 ? i + 1 : argument.as.list->count - i - 1;
+                if (valcopy(&list->items[i], &argument.as.list->items[source]) != NG_OK) {
+                    ng_value cleanup = {.type = NG_VALUE_LIST, .as.list = list};
+                    valfree(&cleanup);
+                    return NG_OOM;
+                }
+            }
+            out->type = NG_VALUE_LIST;
+            out->length = list->count;
+            out->as.list = list;
+            return NG_OK;
+        }
+    }
+    if (s->kind == 20) {
+        size_t branch;
+        ng_value operand, condition;
+        if (s->case_simple &&
+            ng_cy_eval_scalar(g, q, row, s->case_operand, &operand) != NG_OK)
+            return NG_PARSE_ERROR;
+        for (branch = 0; branch + 1 < (size_t)s->list_count; branch += 2) {
+            int matches = s->case_simple
+                              ? (ng_cy_eval_scalar(g, q, row, s->list_items[branch], &condition) ==
+                                     NG_OK &&
+                                 ng_value_equal(&operand, &condition))
+                              : ng_cy_expr_matches(g, q, row, s->list_items[branch]);
+            if (matches)
+                return ng_cy_eval_scalar(g, q, row, s->list_items[branch + 1], out);
+        }
+        if (s->slice_end >= 0)
+            return ng_cy_eval_scalar(g, q, row, s->slice_end, out);
+        out->type = NG_VALUE_NULL;
+        out->length = 0;
+        return NG_OK;
+    }
+    if (s->kind == 11) {
+        ng_value source;
+        ng_value_list* list;
+        size_t j, capacity = 0;
+        if (ng_cy_eval_scalar(g, q, row, s->comprehension_source, &source) != NG_OK)
+            return NG_PARSE_ERROR;
+        if (source.type == NG_VALUE_NULL) {
+            out->type = NG_VALUE_LIST;
+            out->length = 0;
+            out->as.list = (ng_value_list*)calloc(1, sizeof(*out->as.list));
+            if (!out->as.list)
+                return NG_OOM;
+            return NG_OK;
+        }
+        if (source.type != NG_VALUE_LIST || !source.as.list)
+            return NG_PARSE_ERROR;
+        list = (ng_value_list*)calloc(1, sizeof(*list));
+        if (!list)
+            return NG_OOM;
+        for (j = 0; j < source.as.list->count; j++) {
+            ng_cy_row scoped = *row;
+            ng_value item, evaluated;
+            scoped.values[s->comprehension_var].kind = 3;
+            scoped.values[s->comprehension_var].value = source.as.list->items[j];
+            if (s->comprehension_filter >= 0 &&
+                !ng_cy_expr_matches(g, q, &scoped, s->comprehension_filter))
+                continue;
+            if (ng_cy_eval_scalar(g, q, &scoped, s->comprehension_value, &evaluated) != NG_OK)
+                return NG_PARSE_ERROR;
+            if (!grow((void**)&list->items, &capacity, list->count + 1, sizeof(*list->items))) {
+                ng_value cleanup = {.type = NG_VALUE_LIST, .as.list = list};
+                valfree(&cleanup);
+                return NG_OOM;
+            }
+            item = evaluated;
+            if (valcopy(&list->items[list->count], &item) != NG_OK) {
+                ng_value cleanup = {.type = NG_VALUE_LIST, .as.list = list};
+                valfree(&cleanup);
+                return NG_OOM;
+            }
+            list->count++;
+            if (ng_cy_scalar_temporary(q, s->comprehension_value))
+                valfree(&item);
+        }
+        out->type = NG_VALUE_LIST;
+        out->length = list->count;
+        out->as.list = list;
         return NG_OK;
     }
     if (s->kind == 7) {
@@ -5611,6 +8348,40 @@ static ng_status ng_cy_eval_scalar(
     if (ng_cy_eval_scalar(g, q, row, s->left, &a) != NG_OK ||
         ng_cy_eval_scalar(g, q, row, s->right, &b) != NG_OK)
         return NG_PARSE_ERROR;
+    if (s->kind == 2 && a.type == NG_VALUE_LIST && b.type == NG_VALUE_LIST && a.as.list &&
+        b.as.list) {
+        ng_value_list* list = (ng_value_list*)calloc(1, sizeof(*list));
+        size_t ai, bi;
+        if (!list)
+            return NG_OOM;
+        list->count = a.as.list->count + b.as.list->count;
+        if (list->count)
+            list->items = (ng_value*)calloc(list->count, sizeof(*list->items));
+        if (list->count && !list->items) {
+            free(list);
+            return NG_OOM;
+        }
+        for (ai = 0; ai < a.as.list->count; ai++)
+            if (valcopy(&list->items[ai], &a.as.list->items[ai]) != NG_OK) {
+                ng_value cleanup = {.type = NG_VALUE_LIST, .as.list = list};
+                valfree(&cleanup);
+                return NG_OOM;
+            }
+        for (bi = 0; bi < b.as.list->count; bi++)
+            if (valcopy(&list->items[a.as.list->count + bi], &b.as.list->items[bi]) != NG_OK) {
+                ng_value cleanup = {.type = NG_VALUE_LIST, .as.list = list};
+                valfree(&cleanup);
+                return NG_OOM;
+            }
+        out->type = NG_VALUE_LIST;
+        out->length = list->count;
+        out->as.list = list;
+        if (ng_cy_scalar_temporary(q, s->left))
+            valfree(&a);
+        if (ng_cy_scalar_temporary(q, s->right))
+            valfree(&b);
+        return NG_OK;
+    }
     if (a.type != NG_VALUE_INT64 || b.type != NG_VALUE_INT64)
         return NG_PARSE_ERROR;
     out->type = NG_VALUE_INT64;
@@ -7095,22 +9866,66 @@ static ng_status ng_cy_merge_relationship_from_pattern(ng_graph* g,
     return NG_OK;
 }
 static ng_status ng_cy_execute_merge_match(
-    ng_graph* g, ng_cy_query* q, const ng_cy_match* m, ng_cy_row* row, int* changed) {
+    ng_graph* g, ng_cy_query* q, const ng_cy_match* m, ng_cy_row* row, int* changed, int* created) {
     ng_node_id ids[NG_CY_MAX_NODES];
     size_t i;
     ng_status s;
+    int local_changed = 0;
     memset(ids, 0, sizeof(ids));
     for (i = 0; i < m->node_count; i++) {
-        s = ng_cy_merge_node_from_pattern(g, q, &m->nodes[i], row, &ids[i], changed);
+        s = ng_cy_merge_node_from_pattern(g, q, &m->nodes[i], row, &ids[i], &local_changed);
         if (s != NG_OK)
             return s;
     }
     for (i = 0; i < m->rel_count; i++) {
         s = ng_cy_merge_relationship_from_pattern(
-            g, q, &m->rels[i], ids[i], ids[i + 1], row, changed);
+            g, q, &m->rels[i], ids[i], ids[i + 1], row, &local_changed);
         if (s != NG_OK)
             return s;
     }
+    if (local_changed) {
+        if (changed)
+            *changed = 1;
+        if (created)
+            *created = 1;
+    }
+    return NG_OK;
+}
+static const char* ng_cy_merge_action_end(const char* p) {
+    const char* end = p + strlen(p);
+    const char* candidate;
+    const char* words[] = {" ON CREATE ", " ON MATCH ", " RETURN ", " WITH ", " WHERE "};
+    size_t i;
+    for (i = 0; i < sizeof(words) / sizeof(words[0]); i++) {
+        candidate = strstr(p, words[i]);
+        if (candidate && candidate < end)
+            end = candidate;
+    }
+    return end;
+}
+static ng_status ng_cy_copy_merge_action(char* out, size_t capacity, const char* start, const char* end) {
+    size_t length;
+    while (end > start && isspace((unsigned char)end[-1]))
+        end--;
+    length = (size_t)(end - start);
+    if (!length || length >= capacity)
+        return NG_PARSE_ERROR;
+    memcpy(out, start, length);
+    out[length] = 0;
+    return NG_OK;
+}
+static ng_status ng_cy_apply_merge_action(
+    ng_graph* g, ng_cy_query* q, ng_cy_row* row, const char* action, int* changed) {
+    const char* p = action;
+    size_t saved_scalars;
+    ng_status s;
+    if (!action[0])
+        return NG_OK;
+    saved_scalars = q->scalar_count;
+    s = ng_cy_apply_set_to_rows(g, q, row, 1, &p, changed);
+    q->scalar_count = saved_scalars;
+    if (s != NG_OK || *ng_skip_ws(p))
+        return s == NG_OK ? NG_PARSE_ERROR : s;
     return NG_OK;
 }
 static ng_status ng_cy_apply_merge_to_rows(ng_graph* g,
@@ -7139,9 +9954,44 @@ static ng_status ng_cy_apply_merge_to_rows(ng_graph* g,
             return NG_PARSE_ERROR;
     }
     q->create_mode = 0;
+    q->merge_on_create[0] = 0;
+    q->merge_on_match[0] = 0;
+    for (;;) {
+        const char* action_start;
+        const char* action_end;
+        if (!strncmp(p, "ON CREATE", 9) && isspace((unsigned char)p[9])) {
+            action_start = ng_skip_ws(p + 9);
+            if (strncmp(action_start, "SET", 3) || !isspace((unsigned char)action_start[3]))
+                return NG_PARSE_ERROR;
+            action_end = ng_cy_merge_action_end(action_start);
+            if (ng_cy_copy_merge_action(q->merge_on_create,
+                                        sizeof(q->merge_on_create),
+                                        action_start,
+                                        action_end) != NG_OK)
+                return NG_PARSE_ERROR;
+            p = ng_skip_ws(action_end);
+        } else if (!strncmp(p, "ON MATCH", 8) && isspace((unsigned char)p[8])) {
+            action_start = ng_skip_ws(p + 8);
+            if (strncmp(action_start, "SET", 3) || !isspace((unsigned char)action_start[3]))
+                return NG_PARSE_ERROR;
+            action_end = ng_cy_merge_action_end(action_start);
+            if (ng_cy_copy_merge_action(q->merge_on_match,
+                                        sizeof(q->merge_on_match),
+                                        action_start,
+                                        action_end) != NG_OK)
+                return NG_PARSE_ERROR;
+            p = ng_skip_ws(action_end);
+        } else
+            break;
+    }
     for (i = 0; i < row_count; i++)
         for (j = before; j < q->match_count; j++) {
-            s = ng_cy_execute_merge_match(g, q, &q->matches[j], &(*rows)[i], changed);
+            int created = 0;
+            s = ng_cy_execute_merge_match(g, q, &q->matches[j], &(*rows)[i], changed, &created);
+            if (s != NG_OK)
+                return s;
+            s = ng_cy_apply_merge_action(
+                g, q, &(*rows)[i], created ? q->merge_on_create : q->merge_on_match, changed);
             if (s != NG_OK)
                 return s;
         }
@@ -7353,6 +10203,40 @@ static ng_status ng_cy_apply_registered_procedure(
         if (result.field_count > result.field_capacity) {
             free(output);
             return NG_LIMIT;
+        }
+        for (j = 0; j < result.field_count; j++) {
+            size_t k;
+            if (!result.fields[j].name || !result.fields[j].name[0] ||
+                result.fields[j].kind < NG_PROCEDURE_SCALAR ||
+                result.fields[j].kind > NG_PROCEDURE_RELATIONSHIP) {
+                free(output);
+                return NG_PARSE_ERROR;
+            }
+            for (k = 0; k < j; k++)
+                if (!strcmp(result.fields[k].name, result.fields[j].name)) {
+                    free(output);
+                    return NG_PARSE_ERROR;
+                }
+            if (result.fields[j].kind == NG_PROCEDURE_SCALAR &&
+                !ng_valid_value(&result.fields[j].value)) {
+                free(output);
+                return NG_PARSE_ERROR;
+            }
+            if (result.fields[j].kind == NG_PROCEDURE_NODE &&
+                !node(g, result.fields[j].id)) {
+                free(output);
+                return NG_NOT_FOUND;
+            }
+            if (result.fields[j].kind == NG_PROCEDURE_RELATIONSHIP) {
+                size_t relationship_index;
+                for (relationship_index = 0; relationship_index < g->nr; relationship_index++)
+                    if (g->re[relationship_index].id == result.fields[j].id)
+                        break;
+                if (relationship_index == g->nr) {
+                    free(output);
+                    return NG_NOT_FOUND;
+                }
+            }
         }
         for (j = 0; j < yield_count; j++) {
             size_t field_index;

@@ -1,5 +1,6 @@
 CC?=cc
 CFLAGS?=-std=c99 -Wall -Wextra -Wpedantic -O2
+LDLIBS?=-lm
 CPPFLAGS?=-Isrc
 
 BUILD_DIR=build
@@ -30,13 +31,13 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 $(CLI): $(LIB_OBJ) $(CLI_OBJ)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(TEST_BIN): $(LIB_OBJ) $(TEST_OBJ)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(EXAMPLE_BIN): $(LIB_OBJ) $(EXAMPLE_OBJ)
-	$(CC) $(CFLAGS) -o $@ $^
+	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(LIB_OBJ): $(SRC_DIR)/nautylus.c $(SRC_DIR)/nautylus.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $(SRC_DIR)/nautylus.c -o $@

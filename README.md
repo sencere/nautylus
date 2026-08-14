@@ -242,6 +242,7 @@ fail:
 ```
 
 More API details are in [docs/api.md](docs/api.md).
+The GraphSAGE-style embedding API is documented in [docs/graphsage.md](docs/graphsage.md).
 
 ## Graph Analytics API
 
@@ -273,7 +274,9 @@ Implemented algorithms:
 
 All analytics APIs operate on the current in-memory graph and write results into caller-owned arrays. Pass `type = 0` to include all relationship types, or a relationship symbol ID to filter by type. If the output capacity is too small, the call returns `NG_LIMIT` and reports the required count when an `out_count` pointer is supplied.
 
-Heavier algorithms such as Dijkstra/A*, Louvain/Leiden, KNN, embeddings, max flow, weighted paths, and large-scale optimized centrality are not implemented yet.
+Weighted Dijkstra, unweighted BFS shortest paths, callback-based simple-path enumeration, heuristic-driven A*, deterministic label propagation, a Louvain-style local-moving pass, eigenvector, closeness, and harmonic centrality, FastRP-style seeded embeddings, lightweight Node2Vec- and GraphSAGE-style embeddings, configurable GraphSAGE model inference/training, minimum spanning trees, maximum flow, Jaccard KNN similarity, label-filtered KNN, Adamic-Adar, and Resource Allocation link prediction are available through the C API. Full multilevel Louvain/Leiden aggregation, classification-specific training, richer filtered similarity, and large-scale optimized centrality are not implemented yet.
+
+For GraphSAGE-style embeddings, provide one row of numeric features per node and receive a row-major embedding matrix. Reusable models support sampled multi-layer inference, normalization, save/load, and in-memory cosine search. See [docs/graphsage.md](docs/graphsage.md) for the complete call contract and working examples.
 
 ## MiniCypher Subset
 
@@ -297,11 +300,12 @@ MATCH (a:Person) OPTIONAL MATCH (a)-[:KNOWS]->(b) RETURN a.name, b.name
 UNWIND [1, 2, 3] AS value RETURN value
 MATCH (a:Person) RETURN a.city, count(a) AS people ORDER BY people DESC
 MATCH (a:Person) CALL randomWalk(a, 5, 42) YIELD node RETURN node
+MATCH p=(a:Person)-[r:KNOWS]->(b:Person) RETURN nodes(p), relationships(p)
 ```
 
 `CALL randomWalk(start, steps[, seed]) YIELD node` expands each incoming row into one row per visited node, including the start node. The Cypher adapter currently uses outgoing relationships and all relationship types; the typed C API provides direction and relationship-type filters.
 
-Supported scalar values are strings, integers, doubles, booleans, `null`, and lists produced by list literals, list-valued parameters, graph properties, or `collect(...)`. `UNWIND <list-expression> AS variable` expands one input row per list item; empty and null lists produce no rows. Predicate support includes `=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `IS NULL`, `IS NOT NULL`, `AND`, `OR`, `NOT`, and parentheses. Relationship reads support `->`, `<-`, and undirected `-[]-` patterns. Exact or bounded hop counts from 1 to 64 are supported in read relationship patterns, such as `*2` or `*1..3`.
+Supported scalar values are strings, integers, doubles, booleans, `null`, and lists produced by list literals, list-valued parameters, graph properties, or `collect(...)`. List expressions support indexing, negative indexes, slicing with inclusive start/exclusive end bounds, list concatenation with `+`, list comprehensions such as `[x IN xs WHERE x > 1 | x * 2]`, searched and simple `CASE`, and `size`, `head`, `last`, `tail`, `reverse`, `toString`, `coalesce`, `toLower`, `toUpper`, `trim`, and `abs`. `UNWIND <list-expression> AS variable` expands one input row per list item; empty and null lists produce no rows. Predicate support includes `=`, `<>`, `<`, `<=`, `>`, `>=`, `IN`, `IS NULL`, `IS NOT NULL`, `AND`, `OR`, `NOT`, and parentheses. Relationship reads support `->`, `<-`, and undirected `-[]-` patterns. Exact or bounded hop counts from 1 to 64 are supported in read relationship patterns, such as `*2` or `*1..3`.
 
 Projection support includes variables, IDs, property access, literals, parameters, simple arithmetic, aliases with `AS`, `DISTINCT`, and tab-separated multi-column output. `ORDER BY` works after `WITH` and final `RETURN`, supports multiple keys and `ASC`/`DESC`, and executes after projection/aggregation and `DISTINCT`, before `SKIP`/`LIMIT`. Null ordering is deterministic: nulls sort last for ascending order and first for descending order.
 
@@ -328,6 +332,7 @@ MATCH (a:Person) DETACH DELETE a
 MATCH (a:Person) SET a += {city: "Berlin", score: 10}
 MATCH (a:Person) SET a = {name: "Replacement"}
 MERGE (a:Person {name: "A"}), (b:Person {name: "B"}), (a)-[:KNOWS]->(b)
+MERGE (n:Person {name: "A"}) ON CREATE SET n.state = "created" ON MATCH SET n.state = "matched"
 ```
 
 `CREATE` and `MERGE` support single connected patterns and comma-separated pattern lists. Their node and relationship property maps accept scalar expressions evaluated against the current row, including parameters, variables, property access, and arithmetic. `MERGE` reuses the evaluated properties for both lookup and creation. Unconstrained new MERGE nodes without a label or property map are rejected. `SET` supports comma-separated property assignments with scalar expressions on the right-hand side, `SET n += {key: value}` map merges, and `SET n = {key: value}` map replacement. Null map values remove properties. `REMOVE` supports comma-separated property removal and node-label removal. `DELETE` and `DETACH DELETE` support comma-separated node and relationship variables; node deletion removes incident relationships before deleting the node.
@@ -354,8 +359,8 @@ Important MiniCypher limitations:
 * `ORDER BY` uses strict post-projection scope for `WITH`; hidden projection visibility is not implemented.
 * Map literals support nested maps and row-dependent scalar values in `WITH`, `RETURN`, `SET`, `CREATE`, and `MERGE`. Map values are printed in insertion order and are persisted in native snapshots.
 * Lists and complex values are printed and compared for equality, but are not meaningfully ordered.
-* Variable-length relationship patterns are supported in read `MATCH`, but not in `CREATE`/`MERGE` write patterns.
-* `ON CREATE`, `ON MATCH`, subqueries, and path values are not implemented. The built-in `randomWalk` procedure and graph-registered procedures using `CALL ... YIELD field [AS alias]` are supported. Registered procedures receive scalar values plus typed direct node/relationship arguments through the C API.
+* Path bindings are supported for read patterns using `p=(a)-[r:TYPE]->(b)` and bounded variable-length patterns such as `p=(a)-[*1..3]->(b)`. `nodes(p)` and `relationships(p)` return typed ID lists; direct path projection returns a structured `{nodes: [...], relationships: [...]}` value. Path values are not valid write targets.
+* `ON CREATE` and `ON MATCH` currently support `SET` property assignments and map updates after generic `MERGE`; subqueries are not implemented. The built-in `randomWalk` procedure and graph-registered procedures using `CALL ... YIELD field [AS alias]` are supported. Procedure result names must be unique, scalar results must contain valid values, and node/relationship results must reference existing records.
 * `UNION`, `UNION ALL`, and `UNION DISTINCT` validate explicit branch column metadata independently of emitted rows. Names must agree, known non-numeric types must agree, and integer/double columns are compatible; empty and null-only branches are supported. Writes in UNION branches share one transaction and roll back together if a later branch fails.
 * `UNWIND` currently expands scalar list literals, list-valued parameters, and list-valued properties.
 
@@ -532,7 +537,7 @@ Capability summary:
 | Core graph | CRUD, labels, typed properties, property deletion, directed relationships, validation | Incremental adjacency maintenance |
 | Persistence | Single-file snapshots, checksum, strict load checks, atomic replacement where supported | Generations, per-section checksums, directory fsync, migrations |
 | Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `OPTIONAL MATCH`, parameters, aggregation, `ORDER BY`, `SKIP`/`LIMIT`, rollback-protected `CREATE`/`MERGE`/`SET`/`REMOVE`/`DELETE`/`DETACH DELETE`, nested maps, `UNWIND`, typed graph-registered procedures with result aliases, `UNION`/`UNION ALL`/`UNION DISTINCT`, seeded `randomWalk` procedure | Full Cypher compatibility, path values, subqueries |
-| Analytics | Degree centrality, PageRank, weak/strong components, triangle count, local clustering coefficient, common-neighbor style link prediction, topological sort, seeded random walks | Weighted paths, community detection, KNN/similarity, embeddings, max flow, scalable algorithm implementations |
+| Analytics | Degree centrality, PageRank, weak/strong components, triangle count, local clustering coefficient, articulation points, bridges, common-neighbor, Adamic-Adar, Resource Allocation, topological sort, seeded random walks, weighted Dijkstra, BFS, DFS path enumeration, A*, label propagation, and KNN similarity | Louvain/Leiden, embeddings, max flow, scalable algorithm implementations |
 | Import/export | Triple TSV/CSV, property-graph TSV, CLI workflows, rollback on import failure | Stronger two-file crash recovery, richer CLI flags |
 | Release quality | Strict C99 tests, ASan/UBSan run with LeakSanitizer disabled in this environment, documented tested limits, small local performance baseline, local web workbench smoke coverage | CI, fuzzing, profiling |
 
