@@ -1,5 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
 #include "nautylus.h"
+#include <ctype.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,6 +10,8 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#else
+#include <io.h>
 #endif
 
 #define NAUTYLUS_VERSION "0.1.0-alpha"
@@ -41,7 +44,7 @@ static void usage(FILE* out) {
             "  nautylus bench FILE NODE_COUNT\n"
             "  nautylus serve DB PORT\n"
             "  nautylus search DB QUERY\n"
-            "  nautylus query DB QUERY\n"
+            "  nautylus query DB QUERY [--format auto|verbose|plain]\n"
             "  nautylus explain QUERY\n");
 }
 
@@ -942,6 +945,267 @@ static ng_status run_server(const char* path, size_t port) {
 }
 #endif
 
+typedef enum {
+    QUERY_FORMAT_AUTO,
+    QUERY_FORMAT_VERBOSE,
+    QUERY_FORMAT_PLAIN
+} query_format;
+
+static int query_stdout_is_terminal(void) {
+#ifdef _WIN32
+    return _isatty(_fileno(stdout));
+#else
+    return isatty(fileno(stdout));
+#endif
+}
+
+static int query_format_parse(const char* text, query_format* out) {
+    if (!strcmp(text, "auto"))
+        *out = QUERY_FORMAT_AUTO;
+    else if (!strcmp(text, "verbose"))
+        *out = QUERY_FORMAT_VERBOSE;
+    else if (!strcmp(text, "plain"))
+        *out = QUERY_FORMAT_PLAIN;
+    else
+        return 0;
+    return 1;
+}
+
+static char* query_copy_trimmed(const char* start, const char* end) {
+    size_t length;
+    char* copy;
+    while (start < end && isspace((unsigned char)*start))
+        start++;
+    while (end > start && isspace((unsigned char)end[-1]))
+        end--;
+    length = (size_t)(end - start);
+    copy = (char*)malloc(length + 1);
+    if (!copy)
+        return NULL;
+    memcpy(copy, start, length);
+    copy[length] = 0;
+    return copy;
+}
+
+static size_t query_headers(const char* query, char headers[][128], size_t capacity) {
+    const char *return_start = NULL, *p = query, *expression_start;
+    size_t count = 0, depth = 0;
+    int quote = 0;
+    while (*p) {
+        if (*p == '"')
+            quote = !quote;
+        if (!quote && !strncmp(p, "UNION", 5) &&
+            (p == query || !isalnum((unsigned char)p[-1])) && !isalnum((unsigned char)p[5]))
+            break;
+        if (!quote && !strncmp(p, "RETURN", 6) && isspace((unsigned char)p[6]))
+            return_start = p + 6;
+        p++;
+    }
+    if (!return_start)
+        return 0;
+    expression_start = return_start + 1;
+    p = return_start;
+    quote = 0;
+    while (*p) {
+        if (*p == '"')
+            quote = !quote;
+        if (!quote) {
+            if (*p == '(' || *p == '[' || *p == '{')
+                depth++;
+            else if (*p == ')' || *p == ']' || *p == '}') {
+                if (depth)
+                    depth--;
+            } else if (!depth && *p == ',') {
+                char* expression = query_copy_trimmed(expression_start, p);
+                char* alias;
+                const char* name;
+                size_t length;
+                if (!expression)
+                    return 0;
+                alias = strstr(expression, " AS ");
+                name = alias ? alias + 4 : expression;
+                length = strlen(name);
+                if (count < capacity) {
+                    if (length >= 128)
+                        length = 127;
+                    memcpy(headers[count], name, length);
+                    headers[count][length] = 0;
+                }
+                count++;
+                free(expression);
+                expression_start = p + 1;
+            } else if (!depth && ((!strncmp(p, "ORDER", 5) && isspace((unsigned char)p[5])) ||
+                                  (!strncmp(p, "SKIP", 4) && isspace((unsigned char)p[4])) ||
+                                  (!strncmp(p, "LIMIT", 5) && isspace((unsigned char)p[5]))))
+                break;
+        }
+        p++;
+    }
+    if (expression_start < p) {
+        char* expression = query_copy_trimmed(expression_start, p);
+        char* alias;
+        const char* name;
+        size_t length;
+        if (!expression)
+            return 0;
+        alias = strstr(expression, " AS ");
+        name = alias ? alias + 4 : expression;
+        length = strlen(name);
+        if (count < capacity) {
+            if (length >= 128)
+                length = 127;
+            memcpy(headers[count], name, length);
+            headers[count][length] = 0;
+        }
+        count++;
+        free(expression);
+    }
+    return count > capacity ? capacity : count;
+}
+
+typedef struct {
+    char* text;
+    char* cells[16];
+    size_t count;
+} query_output_row;
+
+static void query_output_rows_free(query_output_row* rows, size_t count) {
+    size_t i;
+    for (i = 0; i < count; i++)
+        free(rows[i].text);
+    free(rows);
+}
+
+static ng_status query_print_table(FILE* input, const char* query) {
+    query_output_row* rows = NULL;
+    char headers[16][128] = {{0}};
+    char line[65536];
+    size_t row_count = 0, row_capacity = 0, column_count, i, j;
+    int widths[16] = {0};
+    column_count = query_headers(query, headers, 16);
+    if (fseek(input, 0, SEEK_SET) != 0)
+        return NG_IO_ERROR;
+    while (fgets(line, sizeof(line), input)) {
+        size_t length = strlen(line);
+        query_output_row* row;
+        char* cursor;
+        while (length && (line[length - 1] == '\n' || line[length - 1] == '\r'))
+            line[--length] = 0;
+        if (row_count == row_capacity) {
+            size_t next_capacity = row_capacity ? row_capacity * 2 : 16;
+            query_output_row* grown =
+                (query_output_row*)realloc(rows, next_capacity * sizeof(*rows));
+            if (!grown) {
+                query_output_rows_free(rows, row_count);
+                return NG_OOM;
+            }
+            rows = grown;
+            row_capacity = next_capacity;
+        }
+        row = &rows[row_count++];
+        row->text = (char*)malloc(length + 1);
+        if (!row->text) {
+            query_output_rows_free(rows, row_count - 1);
+            return NG_OOM;
+        }
+        memcpy(row->text, line, length + 1);
+        cursor = row->text;
+        row->count = 0;
+        while (row->count < 16) {
+            row->cells[row->count++] = cursor;
+            cursor = strchr(cursor, '\t');
+            if (!cursor)
+                break;
+            *cursor++ = 0;
+        }
+        if (row->count > column_count)
+            column_count = row->count;
+    }
+    if (ferror(input)) {
+        query_output_rows_free(rows, row_count);
+        return NG_IO_ERROR;
+    }
+    for (i = 0; i < column_count; i++) {
+        if (!headers[i][0])
+            snprintf(headers[i], sizeof(headers[i]), "column%lu", (unsigned long)(i + 1));
+        widths[i] = (int)strlen(headers[i]);
+    }
+    for (i = 0; i < row_count; i++)
+        for (j = 0; j < rows[i].count; j++)
+            if ((int)strlen(rows[i].cells[j]) > widths[j])
+                widths[j] = (int)strlen(rows[i].cells[j]);
+    if (column_count) {
+        fputc('+', stdout);
+        for (i = 0; i < column_count; i++) {
+            size_t k;
+            for (k = 0; k < (size_t)widths[i] + 2; k++)
+                fputc('-', stdout);
+            fputc('+', stdout);
+        }
+        fputc('\n', stdout);
+        fputc('|', stdout);
+        for (i = 0; i < column_count; i++)
+            fprintf(stdout, " %-*s |", widths[i], headers[i]);
+        fputc('\n', stdout);
+        fputc('+', stdout);
+        for (i = 0; i < column_count; i++) {
+            size_t k;
+            for (k = 0; k < (size_t)widths[i] + 2; k++)
+                fputc('-', stdout);
+            fputc('+', stdout);
+        }
+        fputc('\n', stdout);
+        for (i = 0; i < row_count; i++) {
+            fputc('|', stdout);
+            for (j = 0; j < column_count; j++)
+                fprintf(stdout, " %-*s |", widths[j], j < rows[i].count ? rows[i].cells[j] : "");
+            fputc('\n', stdout);
+        }
+        fputc('+', stdout);
+        for (i = 0; i < column_count; i++) {
+            size_t k;
+            for (k = 0; k < (size_t)widths[i] + 2; k++)
+                fputc('-', stdout);
+            fputc('+', stdout);
+        }
+        fputc('\n', stdout);
+    }
+    fprintf(stdout, "%lu row%s\n", (unsigned long)row_count, row_count == 1 ? "" : "s");
+    query_output_rows_free(rows, row_count);
+    return ferror(stdout) ? NG_IO_ERROR : NG_OK;
+}
+
+static ng_status query_copy_plain(FILE* input) {
+    char buffer[8192];
+    size_t length;
+    if (fseek(input, 0, SEEK_SET) != 0)
+        return NG_IO_ERROR;
+    while ((length = fread(buffer, 1, sizeof(buffer), input)) > 0)
+        if (fwrite(buffer, 1, length, stdout) != length)
+            return NG_IO_ERROR;
+    return ferror(input) || ferror(stdout) ? NG_IO_ERROR : NG_OK;
+}
+
+static ng_status run_query_cli(ng_graph* graph,
+                               const char* query,
+                               query_format format,
+                               int* mutated) {
+    FILE* output = tmpfile();
+    ng_status status;
+    if (!output)
+        return NG_IO_ERROR;
+    status = ng_query_execute(graph, query, output, mutated);
+    if (status == NG_OK) {
+        if (format == QUERY_FORMAT_PLAIN ||
+            (format == QUERY_FORMAT_AUTO && !query_stdout_is_terminal()))
+            status = query_copy_plain(output);
+        else
+            status = query_print_table(output, query);
+    }
+    fclose(output);
+    return status;
+}
+
 int main(int argc, char** argv) {
     ng_graph* g = 0;
     ng_status s = NG_INVALID_ARGUMENT;
@@ -1102,11 +1366,28 @@ int main(int argc, char** argv) {
             return 1;
         }
         s = run_server(argv[2], port);
-    } else if (!strcmp(argv[1], "query") && argc == 4) {
+    } else if (!strcmp(argv[1], "query") && (argc == 4 || argc == 6 || argc == 5)) {
+        query_format format = QUERY_FORMAT_AUTO;
         int mutated = 0;
+        if (argc == 5 && strncmp(argv[4], "--format=", 9)) {
+            usage(stderr);
+            return 2;
+        }
+        if (argc == 6 && strcmp(argv[4], "--format")) {
+            usage(stderr);
+            return 2;
+        }
+        if (argc == 5 && !query_format_parse(argv[4] + 9, &format)) {
+            fprintf(stderr, "invalid query format\n");
+            return 2;
+        }
+        if (argc == 6 && !query_format_parse(argv[5], &format)) {
+            fprintf(stderr, "invalid query format\n");
+            return 2;
+        }
         s = ng_open(&g, argv[2]);
         if (s == NG_OK)
-            s = ng_query_execute(g, argv[3], stdout, &mutated);
+            s = run_query_cli(g, argv[3], format, &mutated);
         if (s == NG_OK && mutated)
             s = ng_save(g);
     } else if (!strcmp(argv[1], "search") && argc == 4) {

@@ -138,7 +138,7 @@ nautylus indexes DB
 nautylus bench FILE NODE_COUNT
 nautylus serve DB PORT
 nautylus search DB QUERY
-nautylus query DB QUERY
+nautylus query DB QUERY [--format auto|verbose|plain]
 nautylus explain QUERY
 ```
 
@@ -165,7 +165,7 @@ Notes:
 * `nautylus bench` creates a deterministic benchmark graph, saves/reopens it, validates it, builds an exact-match node index, and prints local timing.
 * `nautylus serve` starts a local browser workbench for querying, importing triples, creating sample data, and managing simple schema metadata.
 * `nautylus search` runs the current MiniCypher subset.
-* `nautylus query` runs the current MiniCypher subset.
+* `nautylus query` runs the current MiniCypher subset. `--format auto` uses a table for terminal output and plain tab-separated values when redirected; `--format verbose` always uses the table, while `--format plain` always emits scripting-friendly values only.
 * `nautylus analyze` and `nautylus analyse` validate the database and print graph counts.
 * `nautylus explain` prints the simple selected query plan.
 * Exit status is `0` on success and non-zero on failure.
@@ -318,7 +318,7 @@ Supported aggregates are `count(*)`, `count(expr)`, `sum(expr)`, and `collect(ex
 Write queries are rollback-protected by the transaction layer:
 
 ```text
-CREATE (a:Person {name: "Anton"})-[:KNOWS]->(b:Person {name: "Stan"})
+CREATE (a:Person {name: "Joe"})-[:KNOWS]->(b:Person {name: "Bob"})
 CREATE (a:Person {name: "A"}), (b:Person {name: "B"})
 MATCH (a:Person) WHERE a.name = "A" SET a.city = "Berlin", a.score = 10
 MATCH (a:Person)-[r:KNOWS]->(b:Person) DELETE r, b
@@ -362,13 +362,15 @@ Example:
 
 ```sh
 ./build/nautylus query graph.ng 'MATCH (n) RETURN n LIMIT 10'
+./build/nautylus query graph.ng 'MATCH (n) RETURN n.name' --format verbose
+./build/nautylus query graph.ng 'MATCH (n) RETURN n.name' --format plain
 ./build/nautylus explain 'MATCH (n:Person) WHERE n.name = "Alice" RETURN n'
 ./build/nautylus query graph.ng 'MATCH (n)-[:KNOWS]->(m) RETURN m'
 ./build/nautylus query graph.ng 'MATCH (n)-[:KNOWS*1..3]->(m) RETURN m'
 ./build/nautylus query graph.ng 'MATCH (n:Person) WHERE id(n) = 1 RETURN n.name'
 ./build/nautylus query graph.ng 'MATCH (n:Person) RETURN n.name ORDER BY n.name DESC LIMIT 5'
 ./build/nautylus query graph.ng 'MATCH (n:Person) RETURN n.city, count(n)'
-./build/nautylus query graph.ng 'CREATE (a:Person {name: "Anton"})-[:KNOWS]->(b:Person {name: "Stan"}) RETURN a.name, b.name'
+./build/nautylus query graph.ng 'CREATE (a:Person {name: "Joe"})-[:KNOWS]->(b:Person {name: "Bob"}) RETURN a.name, b.name'
 ```
 
 ## Web Workbench

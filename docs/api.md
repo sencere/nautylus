@@ -289,7 +289,7 @@ The write-capable API is exposed through `ng_query_execute()` and `ng_query_exec
 Named parameters use `ng_parameter` values and are bound through `ng_query_execute_params()` or `ng_query_print_params()` without textual substitution:
 
 ```c
-ng_parameter parameter = { "name", { NG_VALUE_STRING, 5, { .string = "Anton" } } };
+ng_parameter parameter = { "name", { NG_VALUE_STRING, 3, { .string = "Joe" } } };
 int mutated = 0;
 ng_query_execute_params(g,
     "MATCH (a:Person) WHERE a.name = $name RETURN a",

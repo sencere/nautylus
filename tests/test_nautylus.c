@@ -3073,8 +3073,8 @@ int main(void) {
         assert(system(NAUTYLUS_CLI " create fullcreate.ng > fullcreate-create.out") == 0);
         assert(system(NAUTYLUS_CLI
                       " query fullcreate.ng 'CREATE (a:Person {name: "
-                      "\"Anton\"})-[r:KNOWS {since: 2026}]->(b:Person {name: "
-                      "\"Stan\"}) RETURN a, b, r.since' > fullcreate-forward.out") == 0);
+                      "\"Joe\"})-[r:KNOWS {since: 2026}]->(b:Person {name: "
+                      "\"Bob\"}) RETURN a, b, r.since' > fullcreate-forward.out") == 0);
         ef = fopen("fullcreate-forward.expected", "wb");
         assert(ef);
         fputs("1\t2\t2026\n", ef);
@@ -3085,7 +3085,7 @@ int main(void) {
                       "RETURN a.name, r.since, b.name' > fullcreate-forward-search.out") == 0);
         ef = fopen("fullcreate-forward-search.expected", "wb");
         assert(ef);
-        fputs("Anton\t2026\tStan\n", ef);
+        fputs("Joe\t2026\tBob\n", ef);
         assert(fclose(ef) == 0);
         assert(same_file("fullcreate-forward-search.out", "fullcreate-forward-search.expected"));
         assert(system(NAUTYLUS_CLI
@@ -3699,7 +3699,7 @@ int main(void) {
 
         assert(ng_create(&map_graph, "nested-map.ng") == NG_OK);
         assert(query_tmp(map_graph,
-                         "CREATE (n:Map {profile: {name: \"Anton\", metrics: {score: 7}}}) "
+                         "CREATE (n:Map {profile: {name: \"Joe\", metrics: {score: 7}}}) "
                          "RETURN n.profile",
                          &mutated) == NG_OK);
         assert(mutated && ng_node_count(map_graph) == 1);
@@ -3716,7 +3716,7 @@ int main(void) {
         {
             char output[256] = {0};
             assert(fread(output, 1, sizeof(output) - 1, map_output) > 0);
-            assert(!strcmp(output, "{name: Anton, metrics: {score: 7}}\t{score: 7}\n"));
+            assert(!strcmp(output, "{name: Joe, metrics: {score: 7}}\t{score: 7}\n"));
         }
         assert(fclose(map_output) == 0);
 
