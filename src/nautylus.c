@@ -2437,6 +2437,7 @@ typedef struct {
     uint64_t limit, skip;
     uint32_t min_depth, max_depth;
 } ng_query_plan;
+static ng_status ng_query_capture_legacy_schema(const ng_query_plan* plan);
 static const char* ng_skip_ws(const char* p) {
     while (*p && isspace((unsigned char)*p))
         p++;
@@ -3804,6 +3805,9 @@ static ng_status ng_query_print_active(const ng_graph* g, const char* q, FILE* o
     s = ng_query_parse(q, &plan);
     if (s != NG_OK)
         return s;
+    s = ng_query_capture_legacy_schema(&plan);
+    if (s != NG_OK)
+        return s;
     if (plan.left_label[0]) {
         left_label = ng_symbol_id_by_text(g, plan.left_label);
         if (!left_label)
@@ -4174,7 +4178,7 @@ typedef struct {
     size_t node_count, rel_count;
 } ng_cy_match;
 typedef struct {
-    int kind, left, right, var_index, is_property, is_id, list_count,
+    int kind, left, right, var_index, is_property, is_id, list_count, direct_binding,
         list_items[NG_QUERY_MAX_LIST_VALUES];
     char key[128];
     ng_value value;
@@ -4185,7 +4189,7 @@ typedef struct {
 typedef struct {
     int var_index, is_property, is_id, scalar_index, out_var_index, out_kind, aggregate,
         aggregate_distinct, count_star;
-    char key[128], out_name[64];
+    char key[128], out_name[64], source[128];
 } ng_cy_projection;
 typedef struct {
     int scalar_index, desc, proj_index;
@@ -4227,6 +4231,14 @@ typedef struct {
     ng_cy_result_key key;
     ng_cy_row row;
 } ng_cy_projected_row;
+typedef struct {
+    int valid;
+    size_t count;
+    char names[NG_CY_MAX_RETURNS][128];
+    ng_value_type types[NG_CY_MAX_RETURNS];
+    int type_known[NG_CY_MAX_RETURNS];
+} ng_query_schema;
+static ng_query_schema* ng_query_active_schema;
 static ng_status ng_cy_parse_create_pattern(const char** pp, ng_cy_query* out);
 static ng_status
 ng_cy_execute_create_match(ng_graph* g, ng_cy_query* q, const ng_cy_match* m, ng_cy_row* row);
@@ -4794,7 +4806,7 @@ static ng_status ng_cy_parse_scalar_primary(const char** pp, ng_cy_query* q, int
     char name[64], key[128];
     ng_value v;
     size_t n;
-    int vi;
+    int vi, direct_binding = 0;
     if (*p == '(') {
         p = ng_skip_ws(p + 1);
         if (ng_cy_parse_scalar_add(&p, q, out) != NG_OK)
@@ -4912,11 +4924,14 @@ static ng_status ng_cy_parse_scalar_primary(const char** pp, ng_cy_query* q, int
             return NG_PARSE_ERROR;
         memcpy(key, s, n);
         key[n] = 0;
-    } else
+    } else {
         strcpy(key, q->vars[vi].kind == 3 ? "" : "id");
+        direct_binding = q->vars[vi].kind == 1 || q->vars[vi].kind == 2;
+    }
     *out = ng_cy_scalar_add(q, 1, -1, -1, vi, key, NULL);
     if (*out < 0)
         return NG_PARSE_ERROR;
+    q->scalars[*out].direct_binding = direct_binding;
     *pp = ng_skip_ws(p);
     return NG_OK;
 }
@@ -5755,6 +5770,24 @@ static int ng_query_has_union(const char* query) {
     }
     return 0;
 }
+static int ng_query_has_statement_separator(const char* query) {
+    const char* p = query;
+    while (*p) {
+        if (*p == '"') {
+            p++;
+            while (*p && *p != '"')
+                p++;
+            if (!*p)
+                return 0;
+            p++;
+            continue;
+        }
+        if (*p == ';')
+            return 1;
+        p++;
+    }
+    return 0;
+}
 static ng_status ng_cy_remove_label(ng_graph* g, ng_node_id id, ng_symbol_id label) {
     node_i* n = node(g, id);
     size_t i;
@@ -5892,6 +5925,7 @@ static ng_status ng_cy_parse_projection_list(const char** pp,
     }
     for (;;) {
         ng_cy_projection* r;
+        const char* expression_start = p;
         int scalar = -1, kind = 3;
         char alias[64] = {0};
         if (*count >= NG_CY_MAX_RETURNS)
@@ -5946,6 +5980,13 @@ static ng_status ng_cy_parse_projection_list(const char** pp,
             strcpy(r->key, q->scalars[r->scalar_index].key);
         }
         p = ng_skip_ws(p);
+        {
+            size_t source_length = (size_t)(p - expression_start);
+            if (!source_length || source_length >= sizeof(r->source))
+                return NG_PARSE_ERROR;
+            memcpy(r->source, expression_start, source_length);
+            r->source[source_length] = 0;
+        }
         if (!strncmp(p, "AS", 2) && isspace((unsigned char)p[2])) {
             p = ng_skip_ws(p + 2);
             if (ng_cy_parse_ident(&p, alias, sizeof(alias)) != NG_OK)
@@ -6499,6 +6540,112 @@ static ng_status ng_cy_emit_key(const ng_cy_result_key* key, size_t count, FILE*
     }
     return fputc('\n', out) == EOF ? NG_IO_ERROR : NG_OK;
 }
+static int ng_query_schema_types_compatible(ng_value_type a, ng_value_type b) {
+    if (a == b)
+        return 1;
+    return (a == NG_VALUE_INT64 || a == NG_VALUE_DOUBLE) &&
+           (b == NG_VALUE_INT64 || b == NG_VALUE_DOUBLE);
+}
+static ng_value_type
+ng_cy_projection_static_type(const ng_cy_query* q, const ng_cy_projection* projection, int* known) {
+    const ng_cy_scalar* scalar;
+    *known = 0;
+    if (projection->aggregate == 1) {
+        *known = 1;
+        return NG_VALUE_INT64;
+    }
+    if (projection->aggregate == 3) {
+        *known = 1;
+        return NG_VALUE_LIST;
+    }
+    if (projection->scalar_index < 0)
+        return NG_VALUE_NULL;
+    scalar = &q->scalars[projection->scalar_index];
+    if (projection->aggregate == 2)
+        return NG_VALUE_NULL;
+    if (scalar->kind == 0 && scalar->value.type != NG_VALUE_NULL &&
+        scalar->value.type != NG_VALUE_PARAM) {
+        *known = 1;
+        return scalar->value.type;
+    }
+    if (scalar->kind == 1 && !strcmp(scalar->key, "id")) {
+        *known = 1;
+        return NG_VALUE_INT64;
+    }
+    return NG_VALUE_NULL;
+}
+static ng_status ng_cy_capture_schema(const ng_cy_query* q,
+                                      const ng_cy_projection* projections,
+                                      size_t projection_count,
+                                      const ng_cy_projected_row* rows,
+                                      size_t row_count) {
+    size_t i, j;
+    ng_query_schema* schema = ng_query_active_schema;
+    if (!schema)
+        return NG_OK;
+    schema->valid = 1;
+    if (schema->count && schema->count != projection_count)
+        return NG_PARSE_ERROR;
+    schema->count = projection_count;
+    for (i = 0; i < projection_count; i++) {
+        int known = 0;
+        ng_value_type type = ng_cy_projection_static_type(q, &projections[i], &known);
+        const char* name =
+            projections[i].out_name[0] ? projections[i].out_name : projections[i].source;
+        if (!schema->names[i][0]) {
+            if (strlen(name) >= sizeof(schema->names[i]))
+                return NG_PARSE_ERROR;
+            strcpy(schema->names[i], name);
+        } else if (strcmp(schema->names[i], name)) {
+            return NG_PARSE_ERROR;
+        }
+        if (known) {
+            if (schema->type_known[i] && !ng_query_schema_types_compatible(schema->types[i], type))
+                return NG_PARSE_ERROR;
+            schema->types[i] = type;
+            schema->type_known[i] = 1;
+        }
+    }
+    for (i = 0; i < row_count; i++)
+        for (j = 0; j < projection_count; j++) {
+            ng_value_type type = rows[i].key.values[j].type;
+            if (type == NG_VALUE_NULL)
+                continue;
+            if (schema->type_known[j] && !ng_query_schema_types_compatible(schema->types[j], type))
+                return NG_PARSE_ERROR;
+            schema->types[j] = type;
+            schema->type_known[j] = 1;
+        }
+    return NG_OK;
+}
+static ng_status ng_query_capture_legacy_schema(const ng_query_plan* plan) {
+    ng_query_schema* schema = ng_query_active_schema;
+    size_t i;
+    if (!schema)
+        return NG_OK;
+    schema->valid = 1;
+    schema->count = (size_t)plan->return_count;
+    for (i = 0; i < (size_t)plan->return_count; i++) {
+        int n;
+        if (plan->return_has_aliases[i])
+            n = snprintf(schema->names[i], sizeof(schema->names[i]), "%s", plan->return_aliases[i]);
+        else if (plan->return_is_properties[i])
+            n = snprintf(schema->names[i],
+                         sizeof(schema->names[i]),
+                         "%c.%s",
+                         plan->return_vars[i],
+                         plan->return_keys[i]);
+        else
+            n = snprintf(schema->names[i], sizeof(schema->names[i]), "%c", plan->return_vars[i]);
+        if (n < 0 || (size_t)n >= sizeof(schema->names[i]))
+            return NG_PARSE_ERROR;
+        if (plan->return_is_ids[i]) {
+            schema->types[i] = NG_VALUE_INT64;
+            schema->type_known[i] = 1;
+        }
+    }
+    return NG_OK;
+}
 static ng_status ng_cy_emit_rows(const ng_graph* g,
                                  ng_cy_query* q,
                                  ng_cy_row* rows,
@@ -6519,6 +6666,11 @@ static ng_status ng_cy_emit_rows(const ng_graph* g,
         ng_cy_project_rows(g, q, rows, row_count, ret, ret_count, distinct, 1, &items, &item_count);
     if (s != NG_OK)
         return s;
+    s = ng_cy_capture_schema(q, ret, ret_count, items, item_count);
+    if (s != NG_OK) {
+        free(items);
+        return s;
+    }
     ng_cy_sort_projected_rows(g, q, items, item_count, orders, order_count);
     for (i = 0; i < item_count; i++) {
         if (has_skip && i < skip)
@@ -7095,12 +7247,34 @@ static procedure_i* ng_find_procedure(ng_graph* g, const char* name) {
             return &g->procedures[i];
     return NULL;
 }
+static ng_status ng_cy_eval_procedure_argument(const ng_graph* g,
+                                               const ng_cy_query* q,
+                                               const ng_cy_row* row,
+                                               int scalar_index,
+                                               ng_procedure_argument* out) {
+    const ng_cy_scalar* scalar;
+    if (scalar_index < 0 || scalar_index >= q->scalar_count || !out)
+        return NG_PARSE_ERROR;
+    scalar = &q->scalars[scalar_index];
+    memset(out, 0, sizeof(*out));
+    if (scalar->kind == 1 && scalar->direct_binding) {
+        const ng_cy_binding binding = row->values[scalar->var_index];
+        if (!binding.kind || binding.kind == 3)
+            return NG_PARSE_ERROR;
+        out->kind = binding.kind == 1 ? NG_PROCEDURE_NODE : NG_PROCEDURE_RELATIONSHIP;
+        out->id = binding.id;
+        return NG_OK;
+    }
+    out->kind = NG_PROCEDURE_SCALAR;
+    return ng_cy_eval_scalar(g, q, row, scalar_index, &out->value);
+}
 static ng_status ng_cy_apply_registered_procedure(
     ng_graph* g, ng_cy_query* q, ng_cy_row** rows, size_t* row_count, const char** pp) {
     const char* p = ng_skip_ws(*pp + 4);
     char procedure_name[128];
     int arguments[NG_CY_MAX_RETURNS];
     char yield_names[NG_CY_MAX_RETURNS][64];
+    char yield_aliases[NG_CY_MAX_RETURNS][64];
     int yield_indices[NG_CY_MAX_RETURNS];
     ng_cy_row* output = NULL;
     size_t argument_count = 0, yield_count = 0, output_count = 0, output_capacity = 0, i;
@@ -7137,7 +7311,15 @@ static ng_status ng_cy_apply_registered_procedure(
         if (yield_count >= NG_CY_MAX_RETURNS ||
             ng_cy_parse_ident(&p, yield_names[yield_count], sizeof(yield_names[0])) != NG_OK)
             return NG_PARSE_ERROR;
-        yield_indices[yield_count] = ng_cy_var_index(q, yield_names[yield_count], 3, 1);
+        strcpy(yield_aliases[yield_count], yield_names[yield_count]);
+        p = ng_skip_ws(p);
+        if (ng_cy_clause_starts(p, "AS")) {
+            p = ng_skip_ws(p + 2);
+            if (ng_cy_parse_ident(&p, yield_aliases[yield_count], sizeof(yield_aliases[0])) !=
+                NG_OK)
+                return NG_PARSE_ERROR;
+        }
+        yield_indices[yield_count] = ng_cy_var_index(q, yield_aliases[yield_count], 3, 1);
         if (yield_indices[yield_count] < 0)
             return NG_PARSE_ERROR;
         yield_count++;
@@ -7148,13 +7330,13 @@ static ng_status ng_cy_apply_registered_procedure(
     }
     *pp = p;
     for (i = 0; i < *row_count; i++) {
-        ng_value values[NG_CY_MAX_RETURNS];
+        ng_procedure_argument values[NG_CY_MAX_RETURNS];
         ng_procedure_field fields[NG_CY_MAX_RETURNS];
         ng_procedure_result result;
         ng_cy_row input = (*rows)[i];
         size_t j;
         for (j = 0; j < argument_count; j++) {
-            ng_status s = ng_cy_eval_scalar(g, q, &input, arguments[j], &values[j]);
+            ng_status s = ng_cy_eval_procedure_argument(g, q, &input, arguments[j], &values[j]);
             if (s != NG_OK) {
                 free(output);
                 return s;
@@ -7483,6 +7665,10 @@ ng_query_execute_with(ng_graph* g, const char* q, FILE* out, int* mutated, int* 
             s = last_write ? NG_OK : NG_PARSE_ERROR;
             break;
         }
+    }
+    if (ng_query_active_schema && !ng_query_active_schema->valid) {
+        ng_query_active_schema->valid = 1;
+        ng_query_active_schema->count = 0;
     }
     free(rows);
     if (mutated)
@@ -7842,6 +8028,23 @@ static ng_status ng_query_execute_create(ng_graph* g, const char* q, FILE* out, 
         if (s != NG_OK)
             return s;
     }
+    if (ng_query_active_schema) {
+        ng_cy_projected_row projected;
+        ng_cy_projected_row* items = NULL;
+        size_t item_count = 0;
+        memset(&projected, 0, sizeof(projected));
+        s = ng_cy_project_rows(
+            g, &cy, &row, 1, cy.returns, cy.return_count, 0, 1, &items, &item_count);
+        if (s == NG_OK) {
+            if (item_count)
+                projected = items[0];
+            s = ng_cy_capture_schema(
+                &cy, cy.returns, cy.return_count, item_count ? &projected : NULL, item_count);
+        }
+        free(items);
+        if (s != NG_OK)
+            return s;
+    }
     if (mutated)
         *mutated = 1;
     for (i = 0; i < cy.return_count; i++) {
@@ -7958,6 +8161,8 @@ static ng_status ng_query_execute_set(ng_graph* g, const char* q, FILE* out, int
     ng_query_init_return_plan(&ret, &plan);
     if (ng_query_parse_optional_return(&p, &ret) != NG_OK)
         return NG_PARSE_ERROR;
+    if (ng_query_capture_legacy_schema(&ret) != NG_OK)
+        return NG_PARSE_ERROR;
     if (plan.left_label[0]) {
         label = ng_symbol_id_by_text(g, plan.left_label);
         if (!label)
@@ -8042,6 +8247,10 @@ static ng_status ng_query_execute_delete(ng_graph* g, const char* q, int* mutate
     ng_status st;
     if (ng_query_parse_match_write(q, &plan, &p) != NG_OK)
         return NG_PARSE_ERROR;
+    if (ng_query_active_schema) {
+        ng_query_active_schema->valid = 1;
+        ng_query_active_schema->count = 0;
+    }
     if (strncmp(p, "DELETE", 6) || !isspace((unsigned char)p[6]))
         return NG_PARSE_ERROR;
     p = ng_skip_ws(p + 6);
@@ -8263,6 +8472,8 @@ ng_query_execute_create_relationship(ng_graph* g, const char* q, FILE* out, int*
     }
     if (ng_query_parse_optional_return(&p, &ret) != NG_OK)
         return NG_PARSE_ERROR;
+    if (ng_query_capture_legacy_schema(&ret) != NG_OK)
+        return NG_PARSE_ERROR;
     if (plan.left_label[0]) {
         left_label = ng_symbol_id_by_text(g, plan.left_label);
         if (!left_label)
@@ -8336,6 +8547,8 @@ static ng_status ng_query_execute_merge(ng_graph* g, const char* q, FILE* out, i
     strcpy(ret.left_var_name, var_text);
     if (ng_query_parse_optional_return(&p, &ret) != NG_OK)
         return NG_PARSE_ERROR;
+    if (ng_query_capture_legacy_schema(&ret) != NG_OK)
+        return NG_PARSE_ERROR;
     if (label_text[0]) {
         label = ng_symbol_id_by_text(g, label_text);
         if (!label && ng_symbol(g, label_text, &label) != NG_OK)
@@ -8401,6 +8614,8 @@ ng_query_execute_merge_relationship(ng_graph* g, const char* q, FILE* out, int* 
         strcpy(ret.rel_var_name, rel_var_name);
     }
     if (ng_query_parse_optional_return(&p, &ret) != NG_OK)
+        return NG_PARSE_ERROR;
+    if (ng_query_capture_legacy_schema(&ret) != NG_OK)
         return NG_PARSE_ERROR;
     if (plan.left_label[0]) {
         left_label = ng_symbol_id_by_text(g, plan.left_label);
@@ -8471,6 +8686,8 @@ static int ng_query_is_match_write_tail(const char* tail) {
            (!strncmp(tail, "MERGE", 5) && isspace((unsigned char)tail[5]));
 }
 static int ng_query_is_write(const char* p) {
+    if (ng_query_has_statement_separator(p))
+        return ng_cy_has_write_clause(p);
     if (ng_query_has_union(p))
         return ng_cy_has_write_clause(p);
     if (ng_cy_has_with(p))
@@ -8488,6 +8705,8 @@ static int ng_query_is_write(const char* p) {
     return 0;
 }
 static ng_status ng_query_execute_union(ng_graph* g, const char* query, FILE* out, int* mutated);
+static ng_status ng_query_execute_batch(ng_graph* g, const char* query, FILE* out, int* mutated);
+static ng_status ng_query_execute_impl(ng_graph* g, const char* q, FILE* out, int* mutated);
 static ng_status ng_query_execute_impl(ng_graph* g, const char* q, FILE* out, int* mutated) {
     const char* p = ng_skip_ws(q);
     int handled = 0;
@@ -8496,6 +8715,8 @@ static ng_status ng_query_execute_impl(ng_graph* g, const char* q, FILE* out, in
         return NG_INVALID_ARGUMENT;
     if (mutated)
         *mutated = 0;
+    if (ng_query_has_statement_separator(p))
+        return ng_query_execute_batch(g, p, out, mutated);
     if (ng_query_has_union(p))
         return ng_query_execute_union(g, p, out, mutated);
     ws = ng_query_execute_with(g, p, out, mutated, &handled);
@@ -8526,11 +8747,10 @@ static int ng_query_union_token(const char* p) {
            !ng_ident_char((unsigned char)p[5]);
 }
 static ng_status
-ng_query_split_union(const char* query, char** branches, size_t* branch_count, int* union_all) {
+ng_query_split_union(const char* query, char** branches, size_t* branch_count, int* union_modes) {
     const char* start = query;
     const char* p = query;
     size_t count = 0;
-    int all = 0;
     while (*p) {
         if (*p == '"') {
             p++;
@@ -8557,8 +8777,10 @@ ng_query_split_union(const char* query, char** branches, size_t* branch_count, i
             branches[count][length] = 0;
             count++;
             if (!strncmp(next, "ALL", 3) && !ng_ident_char((unsigned char)next[3])) {
-                all = 1;
+                union_modes[count - 1] = 1;
                 next = ng_skip_ws(next + 3);
+            } else if (!strncmp(next, "DISTINCT", 8) && !ng_ident_char((unsigned char)next[8])) {
+                next = ng_skip_ws(next + 8);
             }
             if (!*next)
                 return NG_PARSE_ERROR;
@@ -8588,14 +8810,17 @@ ng_query_split_union(const char* query, char** branches, size_t* branch_count, i
     if (count < 2)
         return NG_NOT_FOUND;
     *branch_count = count;
-    *union_all = all;
     return NG_OK;
 }
 static ng_status ng_query_execute_union(ng_graph* g, const char* query, FILE* out, int* mutated) {
     char* branches[8] = {0};
+    char** rows = NULL;
+    size_t row_count = 0, row_capacity = 0;
     size_t branch_count = 0, i;
-    int union_all = 0;
-    ng_status s = ng_query_split_union(query, branches, &branch_count, &union_all);
+    int union_modes[7] = {0};
+    ng_query_schema combined_schema;
+    memset(&combined_schema, 0, sizeof(combined_schema));
+    ng_status s = ng_query_split_union(query, branches, &branch_count, union_modes);
     if (s != NG_OK)
         return s == NG_NOT_FOUND ? NG_PARSE_ERROR : s;
     if (mutated)
@@ -8603,56 +8828,181 @@ static ng_status ng_query_execute_union(ng_graph* g, const char* query, FILE* ou
     for (i = 0; i < branch_count; i++) {
         FILE* branch_output = tmpfile();
         int branch_mutated = 0;
+        size_t branch_row_start = row_count;
+        ng_query_schema branch_schema;
+        ng_query_schema* previous_schema;
+        memset(&branch_schema, 0, sizeof(branch_schema));
         if (!branch_output) {
             s = NG_IO_ERROR;
             break;
         }
+        previous_schema = ng_query_active_schema;
+        ng_query_active_schema = &branch_schema;
         s = ng_query_execute_impl(g, branches[i], branch_output, &branch_mutated);
-        if (s == NG_OK && branch_mutated)
-            s = NG_PARSE_ERROR;
+        ng_query_active_schema = previous_schema;
+        if (s == NG_OK && branch_mutated && mutated)
+            *mutated = 1;
         if (s == NG_OK) {
             char line[65536];
             if (fflush(branch_output) != 0 || fseek(branch_output, 0, SEEK_SET) != 0)
                 s = NG_IO_ERROR;
             while (s == NG_OK && fgets(line, sizeof(line), branch_output)) {
-                if (!union_all) {
-                    long position = ftell(out);
-                    char existing[65536];
-                    FILE* saved = tmpfile();
-                    int duplicate = 0;
-                    (void)position;
-                    if (!saved) {
-                        s = NG_IO_ERROR;
-                        break;
-                    }
-                    if (fseek(out, 0, SEEK_SET) == 0)
-                        while (fgets(existing, sizeof(existing), out))
-                            if (!strcmp(existing, line)) {
-                                duplicate = 1;
-                                break;
-                            }
-                    fclose(saved);
-                    if (fseek(out, 0, SEEK_END) != 0) {
-                        s = NG_IO_ERROR;
-                        break;
-                    }
-                    if (duplicate)
-                        continue;
-                }
-                if (fputs(line, out) == EOF) {
-                    s = NG_IO_ERROR;
+                size_t columns = 1, j;
+                char* copy;
+                if (!strchr(line, '\n') && !feof(branch_output)) {
+                    s = NG_LIMIT;
                     break;
                 }
+                for (j = 0; line[j]; j++)
+                    if (line[j] == '\t')
+                        columns++;
+                if (branch_schema.count && branch_schema.count != columns) {
+                    s = NG_PARSE_ERROR;
+                    break;
+                }
+                if (i > 0 && !union_modes[i - 1])
+                    for (j = 0; j < row_count; j++)
+                        if (!strcmp(rows[j], line))
+                            break;
+                if (i > 0 && !union_modes[i - 1] && j < row_count)
+                    continue;
+                if (row_count == row_capacity) {
+                    size_t capacity = row_capacity ? row_capacity * 2 : 16;
+                    char** grown = (char**)realloc(rows, capacity * sizeof(*rows));
+                    if (!grown) {
+                        s = NG_OOM;
+                        break;
+                    }
+                    rows = grown;
+                    row_capacity = capacity;
+                }
+                copy = (char*)malloc(strlen(line) + 1);
+                if (!copy) {
+                    s = NG_OOM;
+                    break;
+                }
+                strcpy(copy, line);
+                rows[row_count++] = copy;
             }
             if (s == NG_OK && ferror(branch_output))
                 s = NG_IO_ERROR;
+        }
+        if (s == NG_OK && !branch_schema.valid)
+            s = NG_PARSE_ERROR;
+        if (s == NG_OK && branch_schema.count == 0 && row_count != branch_row_start)
+            s = NG_PARSE_ERROR;
+        if (s == NG_OK) {
+            size_t j;
+            if (combined_schema.valid && combined_schema.count != branch_schema.count)
+                s = NG_PARSE_ERROR;
+            else if (!combined_schema.valid)
+                combined_schema = branch_schema;
+            else
+                for (j = 0; j < branch_schema.count; j++) {
+                    if (!combined_schema.names[j][0] || !branch_schema.names[j][0] ||
+                        strcmp(combined_schema.names[j], branch_schema.names[j])) {
+                        s = NG_PARSE_ERROR;
+                        break;
+                    }
+                    if (combined_schema.type_known[j] && branch_schema.type_known[j] &&
+                        !ng_query_schema_types_compatible(combined_schema.types[j],
+                                                          branch_schema.types[j])) {
+                        s = NG_PARSE_ERROR;
+                        break;
+                    }
+                    if (!combined_schema.type_known[j] && branch_schema.type_known[j]) {
+                        combined_schema.types[j] = branch_schema.types[j];
+                        combined_schema.type_known[j] = 1;
+                    }
+                }
         }
         fclose(branch_output);
         if (s != NG_OK)
             break;
     }
+    if (s == NG_OK)
+        for (i = 0; i < row_count; i++)
+            if (fputs(rows[i], out) == EOF) {
+                s = NG_IO_ERROR;
+                break;
+            }
+    for (i = 0; i < row_count; i++)
+        free(rows[i]);
+    free(rows);
     for (i = 0; i < branch_count; i++)
         free(branches[i]);
+    return s;
+}
+static ng_status ng_query_execute_batch(ng_graph* g, const char* query, FILE* out, int* mutated) {
+    char* statements[16] = {0};
+    const char* start = query;
+    const char* p = query;
+    size_t count = 0, i;
+    int did_mutate = 0;
+    ng_status s = NG_OK;
+    while (*p) {
+        if (*p == '"') {
+            p++;
+            while (*p && *p != '"')
+                p++;
+            if (!*p)
+                return NG_PARSE_ERROR;
+            p++;
+            continue;
+        }
+        if (*p == ';') {
+            const char* end = p;
+            size_t length;
+            while (end > start && isspace((unsigned char)end[-1]))
+                end--;
+            length = (size_t)(end - start);
+            if (!length || count >= 16)
+                s = length ? NG_LIMIT : NG_PARSE_ERROR;
+            else {
+                statements[count] = (char*)malloc(length + 1);
+                if (!statements[count])
+                    s = NG_OOM;
+                else {
+                    memcpy(statements[count], start, length);
+                    statements[count][length] = 0;
+                    count++;
+                }
+            }
+            if (s != NG_OK)
+                break;
+            start = p + 1;
+        }
+        p++;
+    }
+    if (s == NG_OK) {
+        const char* end = p;
+        size_t length;
+        while (end > start && isspace((unsigned char)end[-1]))
+            end--;
+        length = (size_t)(end - start);
+        if (!length || count >= 16)
+            s = length ? NG_LIMIT : NG_PARSE_ERROR;
+        else {
+            statements[count] = (char*)malloc(length + 1);
+            if (!statements[count])
+                s = NG_OOM;
+            else {
+                memcpy(statements[count], start, length);
+                statements[count][length] = 0;
+                count++;
+            }
+        }
+    }
+    for (i = 0; s == NG_OK && i < count; i++) {
+        int statement_mutated = 0;
+        s = ng_query_execute_impl(g, statements[i], out, &statement_mutated);
+        if (statement_mutated)
+            did_mutate = 1;
+    }
+    for (i = 0; i < count; i++)
+        free(statements[i]);
+    if (mutated)
+        *mutated = did_mutate;
     return s;
 }
 static ng_status ng_query_copy_output(FILE* src, FILE* dst) {

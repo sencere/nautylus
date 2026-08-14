@@ -93,7 +93,12 @@
       min-width: 0;
     }
 
-    .brand img { width: 50px; height: 46px; }
+    .brand img {
+      width: 64px;
+      height: 56px;
+      object-fit: contain;
+      filter: drop-shadow(0 3px 5px rgba(55, 113, 200, .2));
+    }
 
     .query-bar {
       display: grid;
@@ -109,6 +114,7 @@
     }
 
     .query-prompt {
+      position: relative;
       display: grid;
       place-items: center;
       width: 28px;
@@ -117,6 +123,19 @@
       background: var(--accent);
       color: #fff;
       font: 800 16px ui-monospace, SFMono-Regular, Menlo, monospace;
+      box-shadow: 0 0 0 3px rgba(55, 113, 200, .12), 0 3px 8px rgba(55, 113, 200, .22);
+    }
+
+    .query-prompt::after {
+      content: "";
+      position: absolute;
+      right: 5px;
+      bottom: 5px;
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: #fff;
+      opacity: .8;
     }
 
     #query {
@@ -294,6 +313,17 @@
 
     .color-editor .row { margin-top: 0; }
 
+    .check-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 10px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .check-row input { accent-color: var(--accent); }
+
     .relationship-path {
       fill: none;
       stroke: var(--relationship);
@@ -311,7 +341,7 @@
     }
 
     .relationship.selected .relationship-path { stroke: var(--relationship-selected); stroke-width: 3; }
-    .relationship.dimmed { opacity: .15; }
+    .relationship.dimmed { opacity: .42; }
 
     .relationship-label-bg {
       fill: #fff;
@@ -334,7 +364,7 @@
     }
 
     .node { cursor: pointer; }
-    .node.dimmed { opacity: .16; }
+    .node.dimmed { opacity: .72; }
 
     .node-ring {
       fill: #fff;
@@ -441,6 +471,7 @@
     let visibleIds = new Set();
     let nodePositions = new Map();
     let nodeColors = new Map(JSON.parse(localStorage.getItem('nautylus-node-colors') || '[]'));
+    let nodeSpecificColors = new Map(JSON.parse(localStorage.getItem('nautylus-node-specific-colors') || '[]'));
     let nodes = [];
     let relationships = [];
     let selected = null;
@@ -845,7 +876,7 @@
 
     function colorFor(d) {
       const label = d.labels?.[0] || 'Node';
-      const fill = color(label);
+      const fill = nodeSpecificColors.get(String(d.id)) || color(label);
       return { fill, stroke: shade(fill, -24) };
     }
 
@@ -877,6 +908,7 @@
 
     function selectNode(d) {
       const label = d.labels?.[0] || 'Node';
+      const nodeColor = nodeSpecificColors.get(String(d.id)) || color(label);
       selected = { kind: 'node', id: d.id };
       refreshSelectionStyles();
       inspector.innerHTML = `
@@ -885,13 +917,17 @@
         <p><strong>Node ID:</strong> ${escapeHtml(d.id)}</p>
         <h3>Color</h3>
         <div class="color-editor">
-          <input id="inspectorColor" type="color" value="${escapeHtml(color(label))}" aria-label="Node label color">
+          <input id="inspectorColor" type="color" value="${escapeHtml(nodeColor)}" aria-label="Node color">
           <div class="row">
             <button type="button" onclick="applyInspectorColor()">Apply</button>
             <button type="button" onclick="resetInspectorColor()">Reset</button>
           </div>
         </div>
-        <p class="hint">Applies to all ${escapeHtml(label)} nodes.</p>
+        <label class="check-row">
+          <input id="applyLabelColor" type="checkbox">
+          <span>Apply to all ${escapeHtml(label)} nodes</span>
+        </label>
+        <p class="hint">By default this color applies only to node ${escapeHtml(d.id)}.</p>
         <h3>Properties</h3>
         ${propertyTable(d.properties)}
       `;
@@ -950,7 +986,14 @@
         .attr('marker-end', d => selected?.kind === 'relationship' && selected.id === d.id ? 'url(#arrow-selected)' : 'url(#arrow)');
     }
 
+    let highlightTimer = 0;
+
     function highlightNeighborhood(subject) {
+      window.clearTimeout(highlightTimer);
+      highlightTimer = window.setTimeout(() => applyNeighborhoodHighlight(subject), 45);
+    }
+
+    function applyNeighborhoodHighlight(subject) {
       const nodeIds = new Set();
       const relationshipIds = new Set();
       if (subject.labels) {
@@ -974,8 +1017,11 @@
     }
 
     function clearHighlight() {
-      nodeSelection.classed('dimmed', false);
-      relationshipSelection.classed('dimmed', false);
+      window.clearTimeout(highlightTimer);
+      highlightTimer = window.setTimeout(() => {
+        nodeSelection.classed('dimmed', false);
+        relationshipSelection.classed('dimmed', false);
+      }, 70);
     }
 
     function expandNode(node) {
@@ -1075,6 +1121,7 @@
 
     function saveNodeColors() {
       localStorage.setItem('nautylus-node-colors', JSON.stringify([...nodeColors]));
+      localStorage.setItem('nautylus-node-specific-colors', JSON.stringify([...nodeSpecificColors]));
     }
 
     function selectedNode() {
@@ -1087,7 +1134,14 @@
       const value = document.getElementById('inspectorColor')?.value;
       if (!node || !value) return;
       const label = node.labels?.[0] || 'Node';
-      nodeColors.set(label, value);
+      const applyToLabel = document.getElementById('applyLabelColor')?.checked;
+      if (applyToLabel) {
+        nodeColors.set(label, value);
+        nodes.filter(candidate => (candidate.labels?.[0] || 'Node') === label)
+          .forEach(candidate => nodeSpecificColors.delete(String(candidate.id)));
+      } else {
+        nodeSpecificColors.set(String(node.id), value);
+      }
       saveNodeColors();
       updateGraph(false);
       refreshSelectionStyles();
@@ -1098,7 +1152,11 @@
       const node = selectedNode();
       if (!node) return;
       const label = node.labels?.[0] || 'Node';
-      nodeColors.delete(label);
+      const applyToLabel = document.getElementById('applyLabelColor')?.checked;
+      if (applyToLabel)
+        nodeColors.delete(label);
+      else
+        nodeSpecificColors.delete(String(node.id));
       saveNodeColors();
       updateGraph(false);
       refreshSelectionStyles();

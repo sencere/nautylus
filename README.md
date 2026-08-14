@@ -354,7 +354,8 @@ Important MiniCypher limitations:
 * Map literals support nested maps and row-dependent scalar values in `WITH`, `RETURN`, `SET`, `CREATE`, and `MERGE`. Map values are printed in insertion order and are persisted in native snapshots.
 * Lists and complex values are printed and compared for equality, but are not meaningfully ordered.
 * Variable-length relationship patterns are supported in read `MATCH`, but not in `CREATE`/`MERGE` write patterns.
-* `ON CREATE`, `ON MATCH`, subqueries, and path values are not implemented. The built-in `randomWalk` procedure and graph-registered procedures using `CALL ... YIELD ...` are supported; procedure registration is available through the C API.
+* `ON CREATE`, `ON MATCH`, subqueries, and path values are not implemented. The built-in `randomWalk` procedure and graph-registered procedures using `CALL ... YIELD field [AS alias]` are supported. Registered procedures receive scalar values plus typed direct node/relationship arguments through the C API.
+* `UNION`, `UNION ALL`, and `UNION DISTINCT` validate explicit branch column metadata independently of emitted rows. Names must agree, known non-numeric types must agree, and integer/double columns are compatible; empty and null-only branches are supported. Writes in UNION branches share one transaction and roll back together if a later branch fails.
 * `UNWIND` currently expands scalar list literals, list-valued parameters, and list-valued properties.
 
 Example:
@@ -526,7 +527,7 @@ Capability summary:
 | --- | --- | --- |
 | Core graph | CRUD, labels, typed properties, property deletion, directed relationships, validation | Incremental adjacency maintenance |
 | Persistence | Single-file snapshots, checksum, strict load checks, atomic replacement where supported | Generations, per-section checksums, directory fsync, migrations |
-| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `OPTIONAL MATCH`, parameters, aggregation, `ORDER BY`, `SKIP`/`LIMIT`, rollback-protected `CREATE`/`MERGE`/`SET`/`DELETE`, seeded `randomWalk` procedure | Full Cypher compatibility, richer write forms, general procedures, path values, subqueries |
+| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `OPTIONAL MATCH`, parameters, aggregation, `ORDER BY`, `SKIP`/`LIMIT`, rollback-protected `CREATE`/`MERGE`/`SET`/`REMOVE`/`DELETE`/`DETACH DELETE`, nested maps, `UNWIND`, typed graph-registered procedures with result aliases, `UNION`/`UNION ALL`/`UNION DISTINCT`, seeded `randomWalk` procedure | Full Cypher compatibility, path values, subqueries |
 | Analytics | Degree centrality, PageRank, weak/strong components, triangle count, local clustering coefficient, common-neighbor style link prediction, topological sort, seeded random walks | Weighted paths, community detection, KNN/similarity, embeddings, max flow, scalable algorithm implementations |
 | Import/export | Triple TSV/CSV, property-graph TSV, CLI workflows, rollback on import failure | Stronger two-file crash recovery, richer CLI flags |
 | Release quality | Strict C99 tests, ASan/UBSan run with LeakSanitizer disabled in this environment, documented tested limits, small local performance baseline, local web workbench smoke coverage | CI, fuzzing, profiling |

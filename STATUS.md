@@ -12,7 +12,7 @@ The project builds, tests, and produces a working `nautylus` CLI plus an embedda
 | Graph representation | Directed relationships, labels, typed properties, enumeration, bounded breadth-first traversal, validation, incident-edge cleanup, rebuilt adjacency cache | Incremental adjacency maintenance, depth-first traversal ordering |
 | Import/export | Triple TSV/CSV, property-graph TSV, typed values, duplicate suppression, diagnostics, import rollback, deterministic export ordering, CLI workflows, `.nautylusbak` export guards | Stronger two-file crash recovery, more CLI flags |
 | Persistence | Portable single-file snapshots, little-endian encoding, versioned header, checksum, persisted node-property constraints, temporary-file write, pre-save validation, strict load checks | Per-section checksums, generation metadata, migrations, stronger durability semantics |
-| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `UNWIND`, `OPTIONAL MATCH`, parameters, aggregates, `ORDER BY`, `SKIP`/`LIMIT`, `UNION`/`UNION ALL`, rollback-protected `CREATE`/`MERGE`/`SET`/`REMOVE`/`DELETE`/`DETACH DELETE`, nested map expressions in projections and writes, graph-registered procedures with `CALL ... YIELD ...`, seeded `randomWalk` procedure, `EXPLAIN` text | Full Cypher compatibility, path values, subqueries |
+| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `UNWIND`, `OPTIONAL MATCH`, parameters, aggregates, `ORDER BY`, `SKIP`/`LIMIT`, `UNION`/`UNION ALL`/`UNION DISTINCT`, rollback-protected `CREATE`/`MERGE`/`SET`/`REMOVE`/`DELETE`/`DETACH DELETE`, nested map expressions in projections and writes, graph-registered procedures with typed node/relationship arguments and result aliases, seeded `randomWalk` procedure, `EXPLAIN` text | Full Cypher compatibility, path values, subqueries |
 | Transactions/indexes | Public in-memory transaction API, commit, rollback, persistent index metadata, snapshot node index rebuilding | Multi-process conflicts, durable transaction journal, materialized persistent indexes |
 | Release quality | Strict C99 tests, CLI regression coverage, documented tested limits, small local performance baseline, ASan/UBSan run with LeakSanitizer disabled in this environment | CI, fuzzing, profiling |
 | Web/server | Local POSIX HTTP workbench for stats, query/explain, triple import, sample data, constraints, index metadata, interactive graph rendering, node/relationship inspection, typed node properties, and label color editing | Broader API, non-POSIX support |
@@ -118,7 +118,7 @@ Near-term:
 
 1. Add platform-specific export rename failure tests.
 2. Expand malformed-record and constraint edge-case coverage.
-3. Add richer list expressions and procedure result aliasing/metadata.
+3. Add richer list expressions and procedure metadata.
 
 Larger product directions:
 

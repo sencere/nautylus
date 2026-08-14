@@ -315,7 +315,9 @@ size_t path_count = 0;
 ng_random_walk(g, start, &options, path, 101, &path_count);
 ```
 
-Applications can register additional row procedures with `ng_procedure_register()`. A handler receives evaluated scalar arguments and fills named `ng_procedure_field` results. Query syntax is `CALL name(expr, ...) YIELD field, ...`; yielded scalar, node, and relationship values can be consumed by later `WITH`, `MATCH`, and `RETURN` clauses. Registrations belong to the graph handle and are copied into transactional working graphs.
+Applications can register additional row procedures with `ng_procedure_register()`. A handler receives `ng_procedure_argument` values. Scalar arguments contain the normal `ng_value`; direct node and relationship variables are passed as typed `NG_PROCEDURE_NODE` or `NG_PROCEDURE_RELATIONSHIP` arguments with their graph IDs. Handlers fill named `ng_procedure_field` results. Query syntax is `CALL name(expr, ...) YIELD field [AS alias], ...`; aliases become the row variables and can be consumed by later `WITH`, `MATCH`, and `RETURN` clauses. Registrations belong to the graph handle and are copied into transactional working graphs.
+
+`UNION` and `UNION ALL` combine query branches with compatible column metadata. Column names come from aliases or the projection expression and must agree; numeric integer/double types are compatible, while other known type mismatches fail. Null-only and empty branches retain their statically known schema without requiring emitted rows. Plain `UNION` removes duplicate rendered rows, while `UNION ALL` preserves them. `UNION DISTINCT` is accepted as an explicit spelling of plain `UNION`. Branches execute inside the same write transaction when any branch mutates the graph, so a later branch failure rolls back earlier branch writes.
 
 Supported predicate literals:
 

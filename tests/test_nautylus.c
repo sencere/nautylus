@@ -83,19 +83,40 @@ static double absd(double x) {
     return x < 0.0 ? -x : x;
 }
 static ng_status procedure_add(const ng_graph* graph,
-                               const ng_value* arguments,
+                               const ng_procedure_argument* arguments,
                                size_t argument_count,
                                ng_procedure_result* result,
                                void* context) {
     (void)graph;
     (void)context;
-    if (argument_count != 2 || arguments[0].type != NG_VALUE_INT64 ||
-        arguments[1].type != NG_VALUE_INT64 || !result || result->field_capacity < 1)
+    if (argument_count != 2 || arguments[0].kind != NG_PROCEDURE_SCALAR ||
+        arguments[1].kind != NG_PROCEDURE_SCALAR || arguments[0].value.type != NG_VALUE_INT64 ||
+        arguments[1].value.type != NG_VALUE_INT64 || !result || result->field_capacity < 1)
         return NG_PARSE_ERROR;
     result->fields[0].name = "value";
     result->fields[0].kind = NG_PROCEDURE_SCALAR;
     result->fields[0].value.type = NG_VALUE_INT64;
-    result->fields[0].value.as.integer = arguments[0].as.integer + arguments[1].as.integer;
+    result->fields[0].value.as.integer =
+        arguments[0].value.as.integer + arguments[1].value.as.integer;
+    result->field_count = 1;
+    return NG_OK;
+}
+static ng_status procedure_node_id(const ng_graph* graph,
+                                   const ng_procedure_argument* arguments,
+                                   size_t argument_count,
+                                   ng_procedure_result* result,
+                                   void* context) {
+    (void)graph;
+    (void)context;
+    if (argument_count != 1 ||
+        (arguments[0].kind != NG_PROCEDURE_NODE &&
+         arguments[0].kind != NG_PROCEDURE_RELATIONSHIP) ||
+        !result || result->field_capacity < 1)
+        return NG_PARSE_ERROR;
+    result->fields[0].name = "nodeId";
+    result->fields[0].kind = NG_PROCEDURE_SCALAR;
+    result->fields[0].value.type = NG_VALUE_INT64;
+    result->fields[0].value.as.integer = (int64_t)arguments[0].id;
     result->field_count = 1;
     return NG_OK;
 }
@@ -237,14 +258,15 @@ int main(void) {
     assert(ng_open(&r, "test.ng") == NG_OK);
     assert(ng_validate(r) == NG_OK);
     assert(ng_procedure_register(r, "addValues", procedure_add, NULL) == NG_OK);
+    assert(ng_procedure_register(r, "nodeIdentity", procedure_node_id, NULL) == NG_OK);
     {
         FILE* procedure_output = tmpfile();
         int procedure_mutated = 0;
         char procedure_text[64] = {0};
         assert(procedure_output);
         assert(ng_query_execute(r,
-                                "MATCH (a:Person) CALL addValues(id(a), 2) YIELD value "
-                                "RETURN value",
+                                "MATCH (a:Person) CALL addValues(id(a), 2) YIELD value AS total "
+                                "RETURN total",
                                 procedure_output,
                                 &procedure_mutated) == NG_OK);
         assert(!procedure_mutated && fseek(procedure_output, 0, SEEK_SET) == 0);
@@ -252,7 +274,54 @@ int main(void) {
         assert(!strcmp(procedure_text, "3\n"));
         fclose(procedure_output);
     }
+    {
+        FILE* procedure_output = tmpfile();
+        int procedure_mutated = 0;
+        char procedure_text[64] = {0};
+        assert(procedure_output);
+        assert(ng_query_execute(r,
+                                "MATCH (a:Person) CALL nodeIdentity(a) YIELD nodeId AS id "
+                                "RETURN id",
+                                procedure_output,
+                                &procedure_mutated) == NG_OK);
+        assert(!procedure_mutated && fseek(procedure_output, 0, SEEK_SET) == 0);
+        assert(fread(procedure_text, 1, sizeof(procedure_text) - 1, procedure_output) > 0);
+        assert(!strcmp(procedure_text, "1\n"));
+        fclose(procedure_output);
+    }
+    {
+        FILE* procedure_output = tmpfile();
+        int procedure_mutated = 0;
+        char procedure_text[64] = {0};
+        assert(procedure_output);
+        assert(ng_query_execute(r,
+                                "MATCH (a)-[rel:WORKS_AT]->(b) CALL nodeIdentity(rel) "
+                                "YIELD nodeId AS id RETURN id",
+                                procedure_output,
+                                &procedure_mutated) == NG_OK);
+        assert(!procedure_mutated && fseek(procedure_output, 0, SEEK_SET) == 0);
+        assert(fread(procedure_text, 1, sizeof(procedure_text) - 1, procedure_output) > 0);
+        assert(!strcmp(procedure_text, "1\n2\n"));
+        fclose(procedure_output);
+    }
     assert(ng_procedure_unregister(r, "addValues") == NG_OK);
+    assert(ng_procedure_unregister(r, "nodeIdentity") == NG_OK);
+    {
+        FILE* batch_output = tmpfile();
+        int batch_mutated = 0;
+        char batch_text[128] = {0};
+        assert(batch_output);
+        assert(ng_query_execute(r,
+                                "CREATE (first:Batch {name: \"one\"}); "
+                                "CREATE (second:Batch {name: \"two\"}); "
+                                "MATCH (n:Batch) RETURN n.name ORDER BY n.name",
+                                batch_output,
+                                &batch_mutated) == NG_OK);
+        assert(batch_mutated && fseek(batch_output, 0, SEEK_SET) == 0);
+        assert(fread(batch_text, 1, sizeof(batch_text) - 1, batch_output) > 0);
+        assert(!strcmp(batch_text, "one\ntwo\n"));
+        fclose(batch_output);
+    }
     n = 0;
     assert(ng_node_relationships(r, a, NG_DIRECTION_OUTGOING, w, edge_count, &n) == NG_OK &&
            n == 1);
@@ -3668,13 +3737,80 @@ int main(void) {
                          "RETURN inner.value",
                          &mutated) == NG_OK);
         assert(query_tmp(map_graph,
-                         "MATCH (n:Map) RETURN n.profile UNION MATCH (n:MergeMap) "
-                         "RETURN n.payload",
+                         "MATCH (n:Map) RETURN n.profile AS value UNION MATCH (n:MergeMap) "
+                         "RETURN n.payload AS value",
                          &mutated) == NG_OK);
         assert(query_tmp(map_graph,
                          "MATCH (n:Map) RETURN n.profile UNION ALL MATCH (n:Map) "
                          "RETURN n.profile",
                          &mutated) == NG_OK);
+        assert(query_tmp(map_graph,
+                         "MATCH (n:Map) RETURN n.profile UNION DISTINCT MATCH (n:Map) "
+                         "RETURN n.profile",
+                         &mutated) == NG_OK);
+        assert(query_tmp(map_graph,
+                         "MATCH (n:MissingLabel) RETURN n.name UNION MATCH (n:Map) "
+                         "RETURN n.name",
+                         &mutated) == NG_OK);
+        assert(query_tmp(map_graph,
+                         "MATCH (n:Map) RETURN n.name AS left UNION MATCH (n:Map) "
+                         "RETURN n.name AS right",
+                         &mutated) == NG_PARSE_ERROR);
+        assert(query_tmp(map_graph,
+                         "UNWIND [1] AS value RETURN value UNION UNWIND [\"one\"] AS value "
+                         "RETURN value",
+                         &mutated) == NG_PARSE_ERROR);
+        assert(query_tmp(map_graph,
+                         "UNWIND [1] AS value RETURN value AS value UNION UNWIND [1.5] AS value "
+                         "RETURN value AS value",
+                         &mutated) == NG_OK);
+        assert(query_tmp(map_graph,
+                         "UNWIND [null] AS value RETURN value AS value UNION UNWIND [\"one\"] "
+                         "AS value RETURN value AS value",
+                         &mutated) == NG_OK);
+        assert(query_tmp(map_graph,
+                         "MATCH (n:MissingOne) RETURN n.name AS value UNION MATCH (n:MissingTwo) "
+                         "RETURN n.name AS value",
+                         &mutated) == NG_OK);
+        before = ng_node_count(map_graph);
+        assert(query_tmp(map_graph,
+                         "CREATE (emptyOne:UnionWrite) UNION CREATE (emptyTwo:UnionWrite)",
+                         &mutated) == NG_OK);
+        assert(mutated && ng_node_count(map_graph) == before + 2);
+        before = ng_node_count(map_graph);
+        mutated = 99;
+        assert(query_tmp(map_graph,
+                         "CREATE (emptyRollback:UnionWrite) UNION MATCH (n:Map) RETURN "
+                         "n.name AS value",
+                         &mutated) == NG_PARSE_ERROR);
+        assert(!mutated && ng_node_count(map_graph) == before && ng_validate(map_graph) == NG_OK);
+        assert(query_tmp(map_graph,
+                         "MATCH (n:Map) RETURN n.profile UNION MATCH (n:Map) "
+                         "RETURN n.profile, n.payload",
+                         &mutated) == NG_PARSE_ERROR);
+
+        before = ng_node_count(map_graph);
+        assert(query_tmp(map_graph,
+                         "CREATE (one:UnionWrite {name: \"one\"}) RETURN one.name AS name UNION "
+                         "CREATE (two:UnionWrite {name: \"two\"}) RETURN two.name AS name",
+                         &mutated) == NG_OK);
+        assert(mutated && ng_node_count(map_graph) == before + 2);
+        before = ng_node_count(map_graph);
+        mutated = 99;
+        assert(query_tmp(map_graph,
+                         "CREATE (firstSchema:UnionWrite {name: \"first\"}) WITH "
+                         "firstSchema.name AS left RETURN left UNION CREATE "
+                         "(secondSchema:UnionWrite {name: \"second\"}) WITH "
+                         "secondSchema.name AS right RETURN right",
+                         &mutated) == NG_PARSE_ERROR);
+        assert(!mutated && ng_node_count(map_graph) == before && ng_validate(map_graph) == NG_OK);
+        before = ng_node_count(map_graph);
+        mutated = 99;
+        assert(query_tmp(map_graph,
+                         "CREATE (rollback:UnionWrite {name: \"rollback\"}) RETURN "
+                         "rollback.name UNION MATCH (n:Map) SET missing.value = 1 RETURN n",
+                         &mutated) == NG_PARSE_ERROR);
+        assert(!mutated && ng_node_count(map_graph) == before && ng_validate(map_graph) == NG_OK);
 
         before = ng_node_count(map_graph);
         mutated = 99;

@@ -84,12 +84,17 @@ typedef struct {
     ng_value value;
 } ng_procedure_field;
 typedef struct {
+    ng_procedure_value_kind kind;
+    ng_id id;
+    ng_value value;
+} ng_procedure_argument;
+typedef struct {
     ng_procedure_field* fields;
     size_t field_count;
     size_t field_capacity;
 } ng_procedure_result;
 typedef ng_status (*ng_procedure_handler)(const ng_graph* graph,
-                                          const ng_value* arguments,
+                                          const ng_procedure_argument* arguments,
                                           size_t argument_count,
                                           ng_procedure_result* result,
                                           void* context);

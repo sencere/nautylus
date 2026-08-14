@@ -892,7 +892,7 @@ static void handle_client(int fd, const char* db_path) {
             http_send(fd, 404, "text/plain", "not found");
     } else if (!strcmp(route, "/logo.png")) {
         size_t n = 0;
-        char* data = read_file_bytes("resources/logo/logo.png", &n);
+        char* data = read_file_bytes("resources/logo/logo_wotext.png", &n);
         if (data) {
             http_send_file(fd, "image/png", (const unsigned char*)data, n);
             free(data);
