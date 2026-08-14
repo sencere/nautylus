@@ -49,7 +49,7 @@ nautylus indexes DB
 nautylus bench FILE NODE_COUNT
 nautylus serve DB PORT
 nautylus search DB QUERY
-nautylus query DB QUERY
+nautylus query DB QUERY [--format auto|verbose|plain|json]
 nautylus explain QUERY
 ```
 
@@ -82,7 +82,7 @@ Regression coverage includes:
 * persisted required and unique node-property constraints;
 * property-aware node creation with required/unique constraint preflight;
 * property-mutation constraint enforcement;
-* MiniCypher node and bounded relationship query parsing and execution;
+* MiniCypher node, relationship, bounded path, projection, expression, procedure, and union parsing/execution;
 * MiniCypher `CREATE`, `MERGE`, `SET`, `REMOVE`, `DELETE`, and `DETACH DELETE` writes with transaction rollback;
 * map-based `SET +=` merge and `SET =` replacement with null-removal semantics;
 * `WITH`, `UNWIND`, `OPTIONAL MATCH`, parameters, aggregates, ordering, `SKIP`, and `LIMIT`;

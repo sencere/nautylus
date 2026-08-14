@@ -1,5 +1,9 @@
 # Small C99 Property Graph Database
 
+> Historical design/specification note: this file describes the original target
+> and engineering constraints. For current implementation status, use
+> `STATUS.md`; for runnable examples, use `docs/examples.md` and `examples/`.
+
 ## Goal
 
 Replace the current causal language-model experiment with a focused, embedded property-graph database written in portable C99.
@@ -28,14 +32,14 @@ As of the current implementation, the repository builds a portable C99 library a
 * Stable internal IDs for symbols, nodes, and relationships across save/reopen.
 * Labeled nodes, typed directed relationships, and typed node/relationship properties.
 * Relationship enumeration, bounded breadth-first traversal, label checks, property retrieval, property-aware node creation, and exact node scans by label/property.
-* A node-only MiniCypher subset with `MATCH (n)`, optional labels, optional equality predicates, `RETURN n`, `LIMIT`, and `EXPLAIN`.
+* A practical MiniCypher subset with multi-node `MATCH`, relationship expansion, bounded path bindings, `WHERE`, `WITH`, `UNWIND`, `OPTIONAL MATCH`, parameters, aggregates, ordering, `UNION`, procedures, transactional writes, and `EXPLAIN`.
 * Triple TSV import/export and property-graph TSV import/export.
-* CLI commands for `create`, `validate`, `stats`, `import`, `export`, `import-ng`, `export-ng`, `query`, and `explain`.
-* Regression coverage for rollback on import failure, public in-memory transactions, snapshot node indexes, property-aware node creation, property deletion, MiniCypher node queries, typed property-graph round trips, strict snapshot corruption checks, deterministic exports, guarded export replacement, CLI import/export workflows, and a small benchmark smoke path.
-* User-facing documentation in `README.md` covering build commands, CLI workflows, TSV formats, C API examples, persistence behavior, and current limitations.
-* Dedicated status and reference documentation in `STATUS.md`, `docs/api.md`, and `docs/snapshot-format.md`.
+* CLI commands for creation, validation, stats, import/export, constraints, index metadata, querying, explaining, benchmarking, and the local web workbench.
+* Analytics APIs for centrality, components, communities, paths, flows, link prediction, similarity, embeddings, GraphSAGE training/inference, and vector search.
+* Regression coverage for rollback on import/query failure, public in-memory transactions, snapshot node indexes, constraints, MiniCypher reads/writes, typed property-graph round trips, strict snapshot corruption checks, deterministic exports, guarded export replacement, CLI workflows, the local web workbench, analytics, GraphSAGE, and vector indexes.
+* User-facing documentation in `README.md`, `STATUS.md`, `docs/`, and `examples/`.
 
-The remaining roadmap items include a durable transaction journal, stronger two-file export commit recovery, expanded malformed-record coverage, fuzzing/profiling, and the optional HTTP/web interface.
+The remaining roadmap items include scoped subqueries, stronger two-file export commit recovery, durable transaction journaling, expanded malformed-record coverage, fuzzing/profiling, CI, richer analytics, and broader HTTP/API/web work.
 
 ---
 
@@ -93,10 +97,9 @@ Optional platform-specific acceleration may be added behind compile-time feature
 * Multi-process concurrent writers.
 * Lock-free concurrency.
 * General full-text search.
-* Approximate nearest-neighbor indexing.
-* Automatic graph embeddings or GAT training.
-* Stored procedures or plugins.
-* Browser-based administration.
+* Full distributed approximate-nearest-neighbor services.
+* GAT training or dependency-heavy ML runtimes.
+* External plugin loading.
 * Autonomous natural-language question answering.
 
 ---
@@ -608,9 +611,9 @@ RETURN n.name
 LIMIT 10
 ```
 
-### Optional mutation syntax
+### Mutation syntax
 
-Once transactions are stable, the CLI may support:
+The current implementation supports rollback-protected mutation queries such as:
 
 ```text
 CREATE (:Person {name: "Alice"})
@@ -622,22 +625,19 @@ WHERE a.name = "Alice" AND b.name = "Acme"
 CREATE (a)-[:WORKS_AT]->(b)
 ```
 
-Mutation queries may initially be omitted from the parser in favor of explicit C APIs and import commands.
+The supported write subset includes `CREATE`, `MERGE`, scalar and map-based
+`SET`, `REMOVE`, `DELETE`, `DETACH DELETE`, comma-separated pattern lists, and
+`MERGE` `ON CREATE SET` / `ON MATCH SET` property updates.
 
 ### Explicit query limitations
 
-The first parser does not need to support:
+The current parser still does not claim:
 
-* Arbitrary-length path expressions.
 * Subqueries.
-* Aggregation.
-* Query composition with `UNION`.
-* Procedures.
-* List comprehensions.
-* Maps outside property literals.
+* Full Neo4j/Cypher compatibility.
+* Direct path rendering polish beyond current path/list values.
 * Query-plan hints.
-* Variable mutation.
-* Full Cypher null semantics.
+* Full Cypher null semantics in every edge case.
 
 Unsupported syntax must produce a clear diagnostic with line and column numbers.
 
@@ -726,7 +726,10 @@ Traversal must guard against:
 
 ## Triple-oriented queries
 
-To support knowledge-graph workflows, the CLI should include direct triple commands.
+Historical design sketch: direct triple lookup commands were considered for
+knowledge-graph workflows. The current CLI uses `query`, `search`, `export`, and
+the C APIs for these lookups; the `neighbors` and `exists` command forms below
+are not current CLI commands.
 
 ### Find tails
 
@@ -762,9 +765,8 @@ NODE_ID	ENTITY	RELATIONSHIP_ID
   --tail acme
 ```
 
-These commands perform exact graph lookup. They do not predict missing links.
-
-A future optional machine-learning module may add link prediction without becoming part of the core storage engine.
+These command sketches perform exact graph lookup. Link-prediction basics are
+now available through the C analytics API.
 
 ---
 
@@ -1928,16 +1930,15 @@ The first useful release must demonstrate that:
 
 ## Future optional machine-learning module
 
-Graph machine learning should remain separate from the core database.
+Dependency-heavy graph machine learning should remain separate from the core
+database. The core library now includes deterministic embeddings, GraphSAGE-style
+training/inference, vector search, and link-prediction score APIs.
 
 A future optional module may provide:
 
-* Entity and relationship embeddings.
 * Relation-aware Graph Attention Networks.
-* Link prediction.
 * Negative sampling.
 * Filtered MRR and Hits@K evaluation.
-* Embedding export.
 * Prediction of missing heads or tails.
 
 Such a module may consume immutable graph snapshots through the public database API.

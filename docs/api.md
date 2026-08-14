@@ -263,7 +263,7 @@ ng_node_create_with_properties(g, &person_label, 1, props, 1, &node);
 
 `ng_node_create()` remains available as a create-then-set API. Required-property constraints are therefore checked when properties are unset/nulled and at validation boundaries, not at initial node allocation.
 
-## MiniCypher Node Queries
+## MiniCypher Query APIs
 
 `ng_query_nodes()` executes the current node-returning MiniCypher subset:
 
@@ -336,7 +336,7 @@ Supported predicate literals:
 
 `ng_query_explain()` parses the same subset and writes a short textual plan into a caller-provided buffer.
 
-Unsupported syntax returns `NG_PARSE_ERROR`. Nested map values are supported through `NG_VALUE_MAP`; map literals can be evaluated in `WITH`, `RETURN`, `SET`, `CREATE`, and `MERGE`. Path values, subqueries, and full Cypher compatibility are not implemented.
+Unsupported syntax returns `NG_PARSE_ERROR`. Nested map values are supported through `NG_VALUE_MAP`; map literals can be evaluated in `WITH`, `RETURN`, `SET`, `CREATE`, and `MERGE`. Path values are supported for read patterns and can be consumed with `nodes(path)` / `relationships(path)`; they are not valid write targets. Subqueries and full Cypher compatibility are not implemented.
 
 ## Analytics
 

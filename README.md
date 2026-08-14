@@ -531,7 +531,9 @@ Not implemented yet:
 * durable transaction journal;
 * multi-process writer coordination;
 * full Cypher compatibility;
-* weighted path algorithms and large-scale graph analytics;
+* scoped subqueries;
+* direct path rendering beyond the current structured path/list values;
+* large-scale graph analytics;
 * complete two-file export crash recovery;
 * fuzzing and profiling harnesses.
 
@@ -543,8 +545,8 @@ Capability summary:
 | --- | --- | --- |
 | Core graph | CRUD, labels, typed properties, property deletion, directed relationships, validation | Incremental adjacency maintenance |
 | Persistence | Single-file snapshots, checksum, strict load checks, atomic replacement where supported | Generations, per-section checksums, directory fsync, migrations |
-| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `OPTIONAL MATCH`, parameters, aggregation, `ORDER BY`, `SKIP`/`LIMIT`, rollback-protected `CREATE`/`MERGE`/`SET`/`REMOVE`/`DELETE`/`DETACH DELETE`, nested maps, `UNWIND`, typed graph-registered procedures with result aliases, `UNION`/`UNION ALL`/`UNION DISTINCT`, seeded `randomWalk` procedure | Full Cypher compatibility, path values, subqueries |
-| Analytics | Degree centrality, PageRank, weak/strong components, triangle count, local clustering coefficient, articulation points, bridges, common-neighbor, Adamic-Adar, Resource Allocation, topological sort, seeded random walks, weighted Dijkstra, BFS, DFS path enumeration, A*, label propagation, and KNN similarity | Louvain/Leiden, embeddings, max flow, scalable algorithm implementations |
+| Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `UNWIND`, `OPTIONAL MATCH`, parameters, aggregates, `ORDER BY`, `SKIP`/`LIMIT`, `UNION`/`UNION ALL`/`UNION DISTINCT`, rollback-protected `CREATE`/`MERGE`/`SET`/`REMOVE`/`DELETE`/`DETACH DELETE`, nested map expressions, list expressions, searched `CASE`, fixed and bounded variable-length path bindings with `nodes()`/`relationships()`, generic `MERGE` `ON CREATE SET`/`ON MATCH SET`, typed graph-registered procedures with result aliases, seeded `randomWalk` procedure | Full Cypher compatibility, subqueries |
+| Analytics | Degree centrality, PageRank, eigenvector, closeness, harmonic centrality, weak/strong components, triangle count, local clustering coefficient, articulation points, bridges, common-neighbor, Adamic-Adar, Resource Allocation, topological sort, seeded random walks, weighted Dijkstra, BFS, DFS path enumeration, A*, minimum spanning tree, maximum flow, label propagation, Louvain-style local moving, FastRP, Node2Vec-style embeddings, GraphSAGE inference/training, exact/approximate/flat-ANN/HNSW vector search, Jaccard KNN, and label-filtered KNN | Multilevel Louvain/Leiden aggregation, richer filtered similarity, scalable implementations |
 | Import/export | Triple TSV/CSV, property-graph TSV, CLI workflows, rollback on import failure | Stronger two-file crash recovery, richer CLI flags |
 | Release quality | Strict C99 tests, ASan/UBSan run with LeakSanitizer disabled in this environment, documented tested limits, small local performance baseline, local web workbench smoke coverage | CI, fuzzing, profiling |
 
@@ -556,6 +558,8 @@ Detailed evidence is in [STATUS.md](STATUS.md).
 * [docs/api.md](docs/api.md): C API semantics and ownership rules.
 * [docs/snapshot-format.md](docs/snapshot-format.md): native snapshot format and compatibility policy.
 * [docs/limits.md](docs/limits.md): tested limits and local performance baseline.
+* [docs/examples.md](docs/examples.md): runnable examples and query gallery.
+* [docs/graphsage.md](docs/graphsage.md): GraphSAGE, training, prediction, and vector-search APIs.
 * [src/nautylus.h](src/nautylus.h): public C API.
 * [src/nautylus.c](src/nautylus.c): core library implementation.
 * [src/nautylus.c99main.c](src/nautylus.c99main.c): CLI entry point.
