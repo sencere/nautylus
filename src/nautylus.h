@@ -86,6 +86,39 @@ typedef struct {
     double score;
 } ng_vector_score;
 typedef enum {
+    NG_GRAPHSAGE_LOSS_MSE = 0,
+    NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY = 1
+} ng_graphsage_loss_kind;
+typedef struct {
+    uint32_t epochs;
+    double learning_rate;
+    size_t batch_size;
+    double validation_split;
+    uint64_t seed;
+    ng_graphsage_loss_kind loss;
+} ng_graphsage_training_options;
+typedef struct {
+    double training_loss;
+    double validation_loss;
+    size_t training_samples;
+    size_t validation_samples;
+} ng_graphsage_training_report;
+typedef struct {
+    double* epoch_training_losses;
+    double* epoch_validation_losses;
+    size_t epoch_capacity;
+    size_t epoch_count;
+    size_t epochs_run;
+    int converged;
+    double convergence_tolerance;
+    double convergence_delta;
+    size_t validation_start;
+    size_t validation_row_count;
+    size_t* validation_rows;
+    size_t validation_row_capacity;
+    uint64_t validation_seed;
+} ng_graphsage_training_diagnostics;
+typedef enum {
     NG_PROCEDURE_SCALAR = 0,
     NG_PROCEDURE_NODE = 1,
     NG_PROCEDURE_RELATIONSHIP = 2
@@ -351,6 +384,24 @@ ng_status ng_graphsage_model_train(ng_graphsage_model* model,
                                    uint32_t epochs,
                                    double learning_rate,
                                    double* out_loss);
+ng_status ng_graphsage_model_train_ex(ng_graphsage_model* model,
+                                      const ng_graph* g,
+                                      ng_direction direction,
+                                      ng_symbol_id type,
+                                      const double* features,
+                                      const double* targets,
+                                      const ng_graphsage_training_options* options,
+                                      ng_graphsage_training_report* report);
+ng_status ng_graphsage_model_train_ex_diagnostics(
+    ng_graphsage_model* model,
+    const ng_graph* g,
+    ng_direction direction,
+    ng_symbol_id type,
+    const double* features,
+    const double* targets,
+    const ng_graphsage_training_options* options,
+    ng_graphsage_training_report* report,
+    ng_graphsage_training_diagnostics* diagnostics);
 ng_status ng_graphsage_model_save(const ng_graphsage_model* model, const char* path);
 ng_status ng_graphsage_model_load(const char* path, ng_graphsage_model** out);
 ng_status ng_vector_search_cosine(const double* vectors,

@@ -94,8 +94,16 @@ ng_vector_search_cosine(embeddings, node_count, 8, query, 10,
 
 Results are sorted from highest to lowest similarity. The search is an in-memory scan, so a dedicated ANN index is still needed for very large collections.
 
+## Supervised training
+
+`ng_graphsage_model_train()` accepts one target row per graph node and trains with mean-squared error. For mini-batches, validation, or binary classification targets, use `ng_graphsage_model_train_ex()` with `ng_graphsage_training_options`. Set `loss` to `NG_GRAPHSAGE_LOSS_MSE` or `NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY`; binary-cross-entropy targets must be in the `[0, 1]` range. The report contains separate training and validation losses.
+
+Training uses the same cached sampled-neighborhood forward path as inference, then applies analytic backpropagation through mean aggregation, tanh activations, weights, and biases. The implementation supports multi-layer models, optional feature normalization, deterministic neighborhood sampling, mini-batches, validation splits, MSE, and binary cross-entropy. Finite differences are retained only in test-only gradient checks that compare analytic parameter gradients against a numerical reference.
+
+Use `ng_graphsage_model_train_ex_diagnostics()` when the caller needs training metadata beyond the final report. Pass a zero-initialized `ng_graphsage_training_diagnostics` and optional caller-owned buffers for `epoch_training_losses`, `epoch_validation_losses`, and `validation_rows`. `epoch_capacity` limits how many per-epoch losses are written; `epoch_count` still reports the total number of completed epochs. `validation_start`, `validation_row_count`, `validation_rows`, and `validation_seed` describe the deterministic validation split. Set `convergence_tolerance` to a positive value to stop once the absolute change in training loss between consecutive epochs is at or below that threshold; `converged`, `epochs_run`, and `convergence_delta` report the result. The existing `ng_graphsage_model_train()` and `ng_graphsage_model_train_ex()` defaults are unchanged.
+
 ## Validation and limitations
 
 The function returns `NG_INVALID_ARGUMENT` for missing features, zero dimensions, zero iterations, invalid direction, or an invalid relationship type. It returns `NG_LIMIT` when the output capacity is too small or a matrix size overflows, and `NG_OOM` when temporary buffers cannot be allocated.
 
-The current implementation is intended for small in-memory graphs. It does not support mini-batches, classification-specific losses, train/validation splits, edge features, or a persistent vector index. Model serialization, feature normalization, and supervised MSE training are supported.
+The current implementation is intended for small in-memory graphs. Mini-batches, validation splits, model serialization, feature normalization, supervised MSE training, and binary cross-entropy training are supported. Classification-specific multiclass losses, edge features, optimized large-batch training, and a persistent vector index are not yet implemented.

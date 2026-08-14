@@ -52,7 +52,7 @@ $(EXAMPLE_OBJ): $(EXAMPLE_DIR)/basic.c $(SRC_DIR)/nautylus.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $(EXAMPLE_DIR)/basic.c -o $@
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf $(BUILD_DIR) build-asan
 	rm -f test.ng
 
 .PHONY: all test examples perf clean
