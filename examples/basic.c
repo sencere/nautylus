@@ -18,7 +18,7 @@ int main(void) {
     ng_symbol_id person = 0;
     ng_symbol_id knows = 0;
     ng_symbol_id name = 0;
-    ng_node_id alice = 0;
+    ng_node_id joe = 0;
     ng_node_id bob = 0;
     ng_relationship_id relationship = 0;
     ng_value value;
@@ -28,17 +28,19 @@ int main(void) {
     NG_CHECK(ng_symbol(g, "KNOWS", &knows));
     NG_CHECK(ng_symbol(g, "name", &name));
 
-    NG_CHECK(ng_node_create(g, &person, 1, &alice));
+    NG_CHECK(ng_node_create(g, &person, 1, &joe));
     NG_CHECK(ng_node_create(g, &person, 1, &bob));
-    NG_CHECK(ng_relationship_create(g, alice, knows, bob, &relationship));
+    NG_CHECK(ng_relationship_create(g, joe, knows, bob, &relationship));
 
     memset(&value, 0, sizeof(value));
     value.type = NG_VALUE_STRING;
-    value.length = 5;
-    value.as.string = "Alice";
-    NG_CHECK(ng_node_set(g, alice, name, &value));
+    value.length = 3;
+    value.as.string = "Joe";
+    NG_CHECK(ng_node_set(g, joe, name, &value));
 
     NG_CHECK(ng_save(g));
+    printf("saved example.ng with %zu nodes and %zu relationship\n",
+           ng_node_count(g), ng_relationship_count(g));
     ng_close(g);
     return 0;
 

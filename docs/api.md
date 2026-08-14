@@ -6,6 +6,13 @@ Include `src/nautylus.h` and link your program with `build/nautylus.o`.
 cc -std=c99 -Wall -Wextra -Wpedantic -O2 -Isrc my_app.c build/nautylus.o -o my_app
 ```
 
+For runnable examples, build `make examples` and see:
+
+* `examples/basic.c` for direct graph creation and save;
+* `examples/cypher.c` for MiniCypher execution and parameters;
+* `examples/analytics.c` for graph algorithms;
+* `examples/graphsage_vector.c` for GraphSAGE and vector search.
+
 ## Storage Model
 
 * `ng_open()` loads the whole database into memory.
@@ -333,4 +340,8 @@ Unsupported syntax returns `NG_PARSE_ERROR`. Nested map values are supported thr
 
 ## Analytics
 
-The dependency-free analytics API includes degree centrality, PageRank, weakly and strongly connected components, triangle count, local clustering coefficient, common neighbors, preferential attachment, total neighbors, topological sort, seeded random walks, weighted Dijkstra, BFS, DFS path enumeration, A*, label propagation, Louvain-style local moving, KNN similarity, link prediction, centrality measures, minimum spanning trees, maximum flow, FastRP-style embeddings, and lightweight Node2Vec- and GraphSAGE-style embeddings. Analytics operate on the in-memory graph and write into caller-owned buffers. A small output buffer returns `NG_LIMIT` and reports the required count where the API provides an output-count pointer. The embedding and community APIs are deterministic, small-graph approximations rather than trainable or large-scale production implementations.
+The dependency-free analytics API includes degree centrality, PageRank, weakly and strongly connected components, triangle count, local clustering coefficient, common neighbors, preferential attachment, total neighbors, topological sort, seeded random walks, weighted Dijkstra, BFS, DFS path enumeration, A*, label propagation, Louvain-style local moving, KNN similarity, link prediction, centrality measures, minimum spanning trees, maximum flow, FastRP-style embeddings, and lightweight Node2Vec- and GraphSAGE-style embeddings. Analytics operate on the in-memory graph and write into caller-owned buffers. A small output buffer returns `NG_LIMIT` and reports the required count where the API provides an output-count pointer.
+
+Embedding vectors can be searched directly with `ng_vector_search_cosine()` or through a reusable `ng_vector_index`. `ng_vector_index_create()` builds the default exact/signature/ANN/HNSW index, while `ng_vector_index_create_hnsw()` accepts `ng_vector_hnsw_config` for `m`, `ef_construction`, and `ef_search`. Use `ng_vector_index_search_cosine()` for exact search, `ng_vector_index_search_approx_cosine()` for random-projection candidate reranking, `ng_vector_index_search_ann_cosine()` for the older flat graph search, and `ng_vector_index_search_hnsw_cosine()` for deterministic layered HNSW-style search. `ng_vector_index_save()` and `ng_vector_index_load()` persist vectors, signatures, HNSW tuning, and layered neighbor data.
+
+The embedding and community APIs are deterministic, small-graph approximations rather than distributed large-scale production implementations.

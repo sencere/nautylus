@@ -73,6 +73,7 @@ typedef struct ng_graph ng_graph;
 typedef struct ng_transaction ng_transaction;
 typedef struct ng_node_index ng_node_index;
 typedef struct ng_graphsage_model ng_graphsage_model;
+typedef struct ng_vector_index ng_vector_index;
 typedef struct {
     uint32_t layers;
     size_t input_dimensions;
@@ -85,9 +86,15 @@ typedef struct {
     size_t index;
     double score;
 } ng_vector_score;
+typedef struct {
+    size_t m;
+    size_t ef_construction;
+    size_t ef_search;
+} ng_vector_hnsw_config;
 typedef enum {
     NG_GRAPHSAGE_LOSS_MSE = 0,
-    NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY = 1
+    NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY = 1,
+    NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY = 2
 } ng_graphsage_loss_kind;
 typedef struct {
     uint32_t epochs;
@@ -102,6 +109,12 @@ typedef struct {
     double validation_loss;
     size_t training_samples;
     size_t validation_samples;
+    double training_accuracy;
+    double validation_accuracy;
+    double training_precision;
+    double validation_precision;
+    double training_recall;
+    double validation_recall;
 } ng_graphsage_training_report;
 typedef struct {
     double* epoch_training_losses;
@@ -117,6 +130,12 @@ typedef struct {
     size_t* validation_rows;
     size_t validation_row_capacity;
     uint64_t validation_seed;
+    size_t batch_count;
+    size_t cached_forward_reuses;
+    size_t sampled_neighbor_count;
+    size_t gradient_buffer_bytes;
+    size_t subgraph_node_references;
+    size_t subgraph_edge_references;
 } ng_graphsage_training_diagnostics;
 typedef enum {
     NG_PROCEDURE_SCALAR = 0,
@@ -402,6 +421,23 @@ ng_status ng_graphsage_model_train_ex_diagnostics(
     const ng_graphsage_training_options* options,
     ng_graphsage_training_report* report,
     ng_graphsage_training_diagnostics* diagnostics);
+ng_status ng_graphsage_model_predict_probabilities(const ng_graphsage_model* model,
+                                                   const ng_graph* g,
+                                                   ng_direction direction,
+                                                   ng_symbol_id type,
+                                                   const double* features,
+                                                   double* probabilities,
+                                                   size_t capacity,
+                                                   size_t* out_count);
+ng_status ng_graphsage_model_predict_classes(const ng_graphsage_model* model,
+                                             const ng_graph* g,
+                                             ng_direction direction,
+                                             ng_symbol_id type,
+                                             const double* features,
+                                             size_t* classes,
+                                             double* confidence,
+                                             size_t capacity,
+                                             size_t* out_count);
 ng_status ng_graphsage_model_save(const ng_graphsage_model* model, const char* path);
 ng_status ng_graphsage_model_load(const char* path, ng_graphsage_model** out);
 ng_status ng_vector_search_cosine(const double* vectors,
@@ -412,6 +448,46 @@ ng_status ng_vector_search_cosine(const double* vectors,
                                   ng_vector_score* out,
                                   size_t capacity,
                                   size_t* out_count);
+ng_status ng_vector_index_create(const double* vectors,
+                                 size_t vector_count,
+                                 size_t dimensions,
+                                 ng_vector_index** out);
+ng_status ng_vector_index_create_hnsw(const double* vectors,
+                                      size_t vector_count,
+                                      size_t dimensions,
+                                      const ng_vector_hnsw_config* config,
+                                      ng_vector_index** out);
+void ng_vector_index_free(ng_vector_index* index);
+ng_status ng_vector_index_search_cosine(const ng_vector_index* index,
+                                        const double* query,
+                                        size_t k,
+                                        ng_vector_score* out,
+                                        size_t capacity,
+                                        size_t* out_count);
+ng_status ng_vector_index_search_approx_cosine(const ng_vector_index* index,
+                                               const double* query,
+                                               size_t k,
+                                               size_t candidate_count,
+                                               ng_vector_score* out,
+                                               size_t capacity,
+                                               size_t* out_count);
+ng_status ng_vector_index_search_ann_cosine(const ng_vector_index* index,
+                                            const double* query,
+                                            size_t k,
+                                            size_t entry_count,
+                                            size_t search_budget,
+                                            ng_vector_score* out,
+                                            size_t capacity,
+                                            size_t* out_count);
+ng_status ng_vector_index_search_hnsw_cosine(const ng_vector_index* index,
+                                             const double* query,
+                                             size_t k,
+                                             size_t ef_search,
+                                             ng_vector_score* out,
+                                             size_t capacity,
+                                             size_t* out_count);
+ng_status ng_vector_index_save(const ng_vector_index* index, const char* path);
+ng_status ng_vector_index_load(const char* path, ng_vector_index** out);
 ng_status ng_weakly_connected_components(const ng_graph* g,
                                          ng_symbol_id type,
                                          ng_node_component* out,

@@ -127,6 +127,22 @@ struct ng_graphsage_model {
     double** weights;
     double** biases;
 };
+struct ng_vector_index {
+    size_t vector_count;
+    size_t dimensions;
+    double* vectors;
+    uint64_t* signatures;
+    size_t ann_degree;
+    size_t* ann_neighbors;
+    size_t hnsw_m;
+    size_t hnsw_ef_construction;
+    size_t hnsw_ef_search;
+    size_t hnsw_max_level;
+    size_t hnsw_entry;
+    size_t* hnsw_levels;
+    size_t* hnsw_counts;
+    size_t* hnsw_neighbors;
+};
 typedef struct {
     size_t dimensions;
     double* aggregate;
@@ -135,6 +151,7 @@ typedef struct {
     size_t* neighbor_offsets;
     size_t* neighbors;
     size_t neighbor_count;
+    int owns_neighbors;
 } ng_graphsage_layer_cache;
 typedef struct {
     size_t layer_count;
@@ -142,6 +159,18 @@ typedef struct {
     double* input_activation;
     size_t input_dimensions;
 } ng_graphsage_forward_cache;
+typedef struct {
+    size_t count;
+    size_t* nodes;
+    unsigned char* mask;
+} ng_graphsage_node_set;
+typedef struct {
+    size_t layer_count;
+    ng_graphsage_node_set* layer_outputs;
+    ng_graphsage_node_set* layer_inputs;
+    size_t node_references;
+    size_t edge_references;
+} ng_graphsage_subgraph;
 typedef struct {
     double* activation_gradient;
     double* aggregation_gradient;
@@ -153,6 +182,7 @@ typedef struct {
     ng_graphsage_gradient_layer* layers;
     double* input_gradient;
 } ng_graphsage_gradient_cache;
+static size_t ng_graphsage_layer_input(const ng_graphsage_model* model, size_t layer);
 static void ng_graphsage_gradient_cache_free(ng_graphsage_gradient_cache* gradients) {
     size_t i;
     if (!gradients)
@@ -167,6 +197,42 @@ static void ng_graphsage_gradient_cache_free(ng_graphsage_gradient_cache* gradie
     free(gradients->input_gradient);
     memset(gradients, 0, sizeof(*gradients));
 }
+static void ng_graphsage_gradient_cache_zero(const ng_graphsage_model* model,
+                                             const ng_graph* g,
+                                             ng_graphsage_gradient_cache* gradients) {
+    size_t layer;
+    if (!model || !g || !gradients)
+        return;
+    memset(gradients->input_gradient, 0,
+           g->nn * model->input_dimensions * sizeof(*gradients->input_gradient));
+    for (layer = 0; layer < gradients->layer_count; layer++) {
+        size_t input_dimensions = ng_graphsage_layer_input(model, layer);
+        memset(gradients->layers[layer].activation_gradient, 0,
+               g->nn * model->output_dimensions *
+                   sizeof(*gradients->layers[layer].activation_gradient));
+        memset(gradients->layers[layer].aggregation_gradient, 0,
+               g->nn * input_dimensions *
+                   sizeof(*gradients->layers[layer].aggregation_gradient));
+        memset(gradients->layers[layer].weight_gradient, 0,
+               input_dimensions * model->output_dimensions *
+                   sizeof(*gradients->layers[layer].weight_gradient));
+        memset(gradients->layers[layer].bias_gradient, 0,
+               model->output_dimensions *
+                   sizeof(*gradients->layers[layer].bias_gradient));
+    }
+}
+static size_t ng_graphsage_gradient_cache_bytes(const ng_graphsage_model* model,
+                                                const ng_graph* g) {
+    size_t layer, bytes = g->nn * model->input_dimensions * sizeof(double);
+    for (layer = 0; layer < model->layers; layer++) {
+        size_t input_dimensions = ng_graphsage_layer_input(model, layer);
+        bytes += g->nn * model->output_dimensions * sizeof(double);
+        bytes += g->nn * input_dimensions * sizeof(double);
+        bytes += input_dimensions * model->output_dimensions * sizeof(double);
+        bytes += model->output_dimensions * sizeof(double);
+    }
+    return bytes;
+}
 static void ng_graphsage_forward_cache_free(ng_graphsage_forward_cache* cache) {
     size_t i;
     if (!cache)
@@ -176,11 +242,98 @@ static void ng_graphsage_forward_cache_free(ng_graphsage_forward_cache* cache) {
         free(cache->layers[i].aggregate);
         free(cache->layers[i].pre_activation);
         free(cache->layers[i].activation);
-        free(cache->layers[i].neighbor_offsets);
-        free(cache->layers[i].neighbors);
+        if (cache->layers[i].owns_neighbors) {
+            free(cache->layers[i].neighbor_offsets);
+            free(cache->layers[i].neighbors);
+        }
     }
     free(cache->layers);
     memset(cache, 0, sizeof(*cache));
+}
+static void ng_graphsage_node_set_free(ng_graphsage_node_set* set) {
+    if (!set)
+        return;
+    free(set->nodes);
+    free(set->mask);
+    memset(set, 0, sizeof(*set));
+}
+static void ng_graphsage_subgraph_free(ng_graphsage_subgraph* subgraph) {
+    size_t i;
+    if (!subgraph)
+        return;
+    for (i = 0; i < subgraph->layer_count; i++) {
+        ng_graphsage_node_set_free(&subgraph->layer_outputs[i]);
+        ng_graphsage_node_set_free(&subgraph->layer_inputs[i]);
+    }
+    free(subgraph->layer_outputs);
+    free(subgraph->layer_inputs);
+    memset(subgraph, 0, sizeof(*subgraph));
+}
+static ng_status ng_graphsage_node_set_init(ng_graphsage_node_set* set,
+                                            size_t node_count) {
+    memset(set, 0, sizeof(*set));
+    set->nodes = (size_t*)malloc(node_count * sizeof(*set->nodes));
+    set->mask = (unsigned char*)calloc(node_count, sizeof(*set->mask));
+    if (node_count && (!set->nodes || !set->mask)) {
+        ng_graphsage_node_set_free(set);
+        return NG_OOM;
+    }
+    return NG_OK;
+}
+static void ng_graphsage_node_set_add(ng_graphsage_node_set* set, size_t node) {
+    if (!set->mask[node]) {
+        set->mask[node] = 1;
+        set->nodes[set->count++] = node;
+    }
+}
+static ng_status ng_graphsage_subgraph_build(const ng_graph* g,
+                                             const ng_graphsage_forward_cache* sampling_cache,
+                                             const size_t* rows,
+                                             size_t row_count,
+                                             ng_graphsage_subgraph* subgraph) {
+    size_t layer, i, j;
+    if (!g || !sampling_cache || !sampling_cache->layers || !rows || !row_count || !subgraph)
+        return NG_INVALID_ARGUMENT;
+    memset(subgraph, 0, sizeof(*subgraph));
+    subgraph->layer_count = sampling_cache->layer_count;
+    subgraph->layer_outputs =
+        (ng_graphsage_node_set*)calloc(subgraph->layer_count, sizeof(*subgraph->layer_outputs));
+    subgraph->layer_inputs =
+        (ng_graphsage_node_set*)calloc(subgraph->layer_count, sizeof(*subgraph->layer_inputs));
+    if (!subgraph->layer_outputs || !subgraph->layer_inputs)
+        goto oom;
+    for (layer = 0; layer < subgraph->layer_count; layer++) {
+        if (ng_graphsage_node_set_init(&subgraph->layer_outputs[layer], g->nn) != NG_OK ||
+            ng_graphsage_node_set_init(&subgraph->layer_inputs[layer], g->nn) != NG_OK)
+            goto oom;
+    }
+    for (i = 0; i < row_count; i++)
+        ng_graphsage_node_set_add(&subgraph->layer_outputs[subgraph->layer_count - 1],
+                                  rows[i]);
+    for (layer = subgraph->layer_count; layer > 0; layer--) {
+        size_t index = layer - 1;
+        ng_graphsage_node_set* outputs = &subgraph->layer_outputs[index];
+        ng_graphsage_node_set* inputs = &subgraph->layer_inputs[index];
+        for (i = 0; i < outputs->count; i++) {
+            size_t node = outputs->nodes[i];
+            size_t start = sampling_cache->layers[index].neighbor_offsets[node];
+            size_t end = sampling_cache->layers[index].neighbor_offsets[node + 1];
+            ng_graphsage_node_set_add(inputs, node);
+            for (j = start; j < end; j++)
+                ng_graphsage_node_set_add(inputs, sampling_cache->layers[index].neighbors[j]);
+            subgraph->edge_references += end - start;
+        }
+        subgraph->node_references += outputs->count + inputs->count;
+        if (index) {
+            ng_graphsage_node_set* previous_outputs = &subgraph->layer_outputs[index - 1];
+            for (i = 0; i < inputs->count; i++)
+                ng_graphsage_node_set_add(previous_outputs, inputs->nodes[i]);
+        }
+    }
+    return NG_OK;
+oom:
+    ng_graphsage_subgraph_free(subgraph);
+    return NG_OOM;
 }
 typedef struct {
     ng_node_id id;
@@ -2829,14 +2982,37 @@ static ng_status ng_graphsage_aggregate(const ng_graph* g,
                                         const double* current,
                                         size_t dimensions,
                                         double* aggregate,
+                                        const ng_graphsage_node_set* active_outputs,
                                         ng_graphsage_layer_cache* cache) {
     size_t i, j, d;
+    if (cache && cache->neighbor_offsets && (!cache->neighbor_count || cache->neighbors)) {
+        size_t active_count = active_outputs ? active_outputs->count : g->nn;
+        cache->dimensions = dimensions;
+        for (i = 0; i < active_count; i++) {
+            size_t node = active_outputs ? active_outputs->nodes[i] : i;
+            size_t start = cache->neighbor_offsets[node];
+            size_t end = cache->neighbor_offsets[node + 1];
+            for (d = 0; d < dimensions; d++)
+                aggregate[node * dimensions + d] = current[node * dimensions + d];
+            for (j = start; j < end; j++) {
+                size_t other = cache->neighbors[j];
+                for (d = 0; d < dimensions; d++)
+                    aggregate[node * dimensions + d] += current[other * dimensions + d];
+            }
+            for (d = 0; d < dimensions; d++)
+                aggregate[node * dimensions + d] /= (double)(end - start + 1);
+        }
+        return NG_OK;
+    }
     if (cache) {
+        size_t neighbor_capacity = direction == NG_DIRECTION_EITHER ? g->nr * 2 : g->nr;
         cache->dimensions = dimensions;
         cache->neighbor_offsets = (size_t*)calloc(g->nn + 1, sizeof(size_t));
-        cache->neighbors = g->nr ? (size_t*)malloc(g->nr * sizeof(size_t)) : NULL;
+        cache->neighbors = neighbor_capacity ? (size_t*)malloc(neighbor_capacity * sizeof(size_t))
+                                             : NULL;
         cache->neighbor_count = 0;
-        if ((g->nn && !cache->neighbor_offsets) || (g->nr && !cache->neighbors))
+        cache->owns_neighbors = 1;
+        if ((g->nn && !cache->neighbor_offsets) || (neighbor_capacity && !cache->neighbors))
             return NG_OOM;
     }
     for (i = 0; i < g->nn; i++) {
@@ -2899,6 +3075,8 @@ static ng_status ng_graphsage_forward(const ng_graphsage_model* model,
                                    double* out,
                                    size_t capacity,
                                    size_t* out_count,
+                                   const ng_graphsage_forward_cache* sampling_cache,
+                                   const ng_graphsage_subgraph* subgraph,
                                    ng_graphsage_forward_cache* out_cache) {
     double *current = NULL, *normalized = NULL, *aggregate = NULL, *next = NULL;
     ng_graphsage_forward_cache cache = {0};
@@ -2948,6 +3126,9 @@ static ng_status ng_graphsage_forward(const ng_graphsage_model* model,
                g->nn * current_dimensions * sizeof(double));
     }
     for (layer = 0; layer < model->layers; layer++) {
+        const ng_graphsage_node_set* active_outputs =
+            subgraph ? &subgraph->layer_outputs[layer] : NULL;
+        size_t active_count = active_outputs ? active_outputs->count : g->nn;
         cache.layers[layer].aggregate = (double*)malloc(
             g->nn * current_dimensions * sizeof(double));
         cache.layers[layer].pre_activation = (double*)malloc(
@@ -2959,25 +3140,34 @@ static ng_status ng_graphsage_forward(const ng_graphsage_model* model,
             status = NG_OOM;
             goto finish;
         }
+        if (sampling_cache && sampling_cache->layers && layer < sampling_cache->layer_count) {
+            cache.layers[layer].neighbor_offsets = sampling_cache->layers[layer].neighbor_offsets;
+            cache.layers[layer].neighbors = sampling_cache->layers[layer].neighbors;
+            cache.layers[layer].neighbor_count = sampling_cache->layers[layer].neighbor_count;
+            cache.layers[layer].owns_neighbors = 0;
+        }
         status = ng_graphsage_aggregate(g, direction, type, model->neighborhood_sample,
                                         current, current_dimensions, aggregate,
+                                        active_outputs,
                                         &cache.layers[layer]);
         if (status != NG_OK)
             goto finish;
         if (g->nn)
             memcpy(cache.layers[layer].aggregate, aggregate,
                    g->nn * current_dimensions * sizeof(double));
-        for (i = 0; i < g->nn; i++)
+        for (i = 0; i < active_count; i++) {
+            size_t node = active_outputs ? active_outputs->nodes[i] : i;
             for (d = 0; d < model->output_dimensions; d++) {
                 double value = model->biases[layer][d];
                 for (j = 0; j < current_dimensions; j++)
-                    value += aggregate[i * current_dimensions + j] *
+                    value += aggregate[node * current_dimensions + j] *
                              model->weights[layer][j * model->output_dimensions + d];
-                cache.layers[layer].pre_activation[i * model->output_dimensions + d] = value;
-                next[i * model->output_dimensions + d] = tanh(value);
-                cache.layers[layer].activation[i * model->output_dimensions + d] =
-                    next[i * model->output_dimensions + d];
+                cache.layers[layer].pre_activation[node * model->output_dimensions + d] = value;
+                next[node * model->output_dimensions + d] = tanh(value);
+                cache.layers[layer].activation[node * model->output_dimensions + d] =
+                    next[node * model->output_dimensions + d];
             }
+        }
         if (layer + 1 < model->layers) {
             memcpy(current, next, g->nn * model->output_dimensions * sizeof(*current));
             current_dimensions = model->output_dimensions;
@@ -2997,6 +3187,49 @@ finish:
     ng_graphsage_forward_cache_free(&cache);
     return status;
 }
+static ng_status ng_graphsage_sampling_cache_prepare(const ng_graphsage_model* model,
+                                                     const ng_graph* g,
+                                                     ng_direction direction,
+                                                     ng_symbol_id type,
+                                                     ng_graphsage_forward_cache* cache) {
+    double* current = NULL;
+    double* aggregate = NULL;
+    size_t layer, current_dimensions;
+    ng_status status = NG_OK;
+    if (!model || !g || !cache)
+        return NG_INVALID_ARGUMENT;
+    memset(cache, 0, sizeof(*cache));
+    cache->layer_count = model->layers;
+    cache->layers = (ng_graphsage_layer_cache*)calloc(model->layers, sizeof(*cache->layers));
+    current = (double*)calloc(g->nn * (model->input_dimensions > model->output_dimensions
+                                           ? model->input_dimensions
+                                           : model->output_dimensions),
+                              sizeof(*current));
+    aggregate = (double*)calloc(g->nn * (model->input_dimensions > model->output_dimensions
+                                             ? model->input_dimensions
+                                             : model->output_dimensions),
+                                sizeof(*aggregate));
+    if (!cache->layers || (g->nn && (!current || !aggregate))) {
+        status = NG_OOM;
+        goto finish;
+    }
+    current_dimensions = model->input_dimensions;
+    for (layer = 0; layer < model->layers; layer++) {
+        status = ng_graphsage_aggregate(g, direction, type, model->neighborhood_sample,
+                                        current, current_dimensions, aggregate,
+                                        NULL,
+                                        &cache->layers[layer]);
+        if (status != NG_OK)
+            goto finish;
+        current_dimensions = model->output_dimensions;
+    }
+finish:
+    free(current);
+    free(aggregate);
+    if (status != NG_OK)
+        ng_graphsage_forward_cache_free(cache);
+    return status;
+}
 ng_status ng_graphsage_model_infer(const ng_graphsage_model* model,
                                    const ng_graph* g,
                                    ng_direction direction,
@@ -3005,7 +3238,8 @@ ng_status ng_graphsage_model_infer(const ng_graphsage_model* model,
                                    double* out,
                                    size_t capacity,
                                    size_t* out_count) {
-    return ng_graphsage_forward(model, g, direction, type, features, out, capacity, out_count, NULL);
+    return ng_graphsage_forward(model, g, direction, type, features, out, capacity, out_count,
+                                NULL, NULL, NULL);
 }
 ng_status ng_graphsage_model_train(ng_graphsage_model* model,
                                    const ng_graph* g,
@@ -3058,42 +3292,82 @@ static double ng_graphsage_loss_gradient(double prediction,
     }
     return 2.0 * (prediction - target);
 }
+static double ng_graphsage_softmax_row_loss(const double* prediction,
+                                            const double* target,
+                                            size_t dimensions) {
+    size_t d;
+    double max_value = prediction[0], sum = 0.0, loss = 0.0;
+    for (d = 1; d < dimensions; d++)
+        if (prediction[d] > max_value)
+            max_value = prediction[d];
+    for (d = 0; d < dimensions; d++)
+        sum += exp(prediction[d] - max_value);
+    for (d = 0; d < dimensions; d++) {
+        double probability = exp(prediction[d] - max_value) / sum;
+        if (probability < 1e-12)
+            probability = 1e-12;
+        loss -= target[d] * log(probability);
+    }
+    return loss;
+}
+static void ng_graphsage_softmax_row_gradient(const double* prediction,
+                                              const double* target,
+                                              size_t dimensions,
+                                              double scale,
+                                              double* gradient) {
+    size_t d;
+    double max_value = prediction[0], sum = 0.0;
+    for (d = 1; d < dimensions; d++)
+        if (prediction[d] > max_value)
+            max_value = prediction[d];
+    for (d = 0; d < dimensions; d++)
+        sum += exp(prediction[d] - max_value);
+    for (d = 0; d < dimensions; d++)
+        gradient[d] = (exp(prediction[d] - max_value) / sum - target[d]) * scale;
+}
 static void ng_graphsage_backprop_layer(const ng_graphsage_layer_cache* layer,
                                         const double* output_gradient,
                                         size_t node_count,
                                         size_t input_dimensions,
                                         size_t output_dimensions,
                                         const double* weights,
+                                        const ng_graphsage_node_set* active_outputs,
                                         double* aggregation_gradient,
                                         double* weight_gradient,
                                         double* bias_gradient) {
     size_t i, j, d;
-    for (i = 0; i < node_count; i++)
+    size_t active_count = active_outputs ? active_outputs->count : node_count;
+    for (i = 0; i < active_count; i++) {
+        size_t node = active_outputs ? active_outputs->nodes[i] : i;
         for (d = 0; d < output_dimensions; d++) {
-            size_t o = i * output_dimensions + d;
+            size_t o = node * output_dimensions + d;
             double delta = output_gradient[o] * (1.0 - layer->activation[o] * layer->activation[o]);
             bias_gradient[d] += delta;
             for (j = 0; j < input_dimensions; j++) {
                 weight_gradient[j * output_dimensions + d] +=
-                    layer->aggregate[i * input_dimensions + j] * delta;
-                aggregation_gradient[i * input_dimensions + j] +=
+                    layer->aggregate[node * input_dimensions + j] * delta;
+                aggregation_gradient[node * input_dimensions + j] +=
                     weights[j * output_dimensions + d] * delta;
             }
         }
+    }
 }
 static void ng_graphsage_backprop_aggregation(const ng_graphsage_layer_cache* layer,
                                               const double* aggregation_gradient,
                                               size_t node_count,
                                               size_t dimensions,
+                                              const ng_graphsage_node_set* active_outputs,
                                               double* input_gradient) {
     size_t i, d, k;
-    for (i = 0; i < node_count; i++) {
-        size_t start = layer->neighbor_offsets ? layer->neighbor_offsets[i] : 0;
-        size_t end = layer->neighbor_offsets ? layer->neighbor_offsets[i + 1] : 0;
+    size_t active_count = active_outputs ? active_outputs->count : node_count;
+    for (i = 0; i < active_count; i++) {
+        size_t node = active_outputs ? active_outputs->nodes[i] : i;
+        size_t start = layer->neighbor_offsets ? layer->neighbor_offsets[node] : 0;
+        size_t end = layer->neighbor_offsets ? layer->neighbor_offsets[node + 1] : 0;
         double scale = 1.0 / (double)(end - start + 1);
         for (d = 0; d < dimensions; d++) {
-            double share = aggregation_gradient[i * dimensions + d] * scale;
-            input_gradient[i * dimensions + d] += share;
+            double share = aggregation_gradient[node * dimensions + d] * scale;
+            input_gradient[node * dimensions + d] += share;
             for (k = start; k < end; k++)
                 input_gradient[layer->neighbors[k] * dimensions + d] += share;
         }
@@ -3109,6 +3383,8 @@ static ng_status ng_graphsage_gradients(const ng_graphsage_model* model,
                                         size_t row_count,
                                         ng_graphsage_loss_kind kind,
                                         double* prediction,
+                                        const ng_graphsage_forward_cache* sampling_cache,
+                                        const ng_graphsage_subgraph* subgraph,
                                         ng_graphsage_gradient_cache* gradients,
                                         double* out_loss) {
     ng_graphsage_forward_cache cache = {0};
@@ -3120,48 +3396,65 @@ static ng_status ng_graphsage_gradients(const ng_graphsage_model* model,
         return NG_INVALID_ARGUMENT;
     total = g->nn * model->output_dimensions;
     status = ng_graphsage_forward(model, g, direction, type, features, prediction,
-                                  total, NULL, &cache);
+                                  total, NULL, sampling_cache, subgraph, &cache);
     if (status != NG_OK)
         return status;
-    gradients->layer_count = model->layers;
-    gradients->layers = (ng_graphsage_gradient_layer*)calloc(model->layers,
-                                                             sizeof(*gradients->layers));
-    gradients->input_gradient = (double*)calloc(g->nn * model->input_dimensions,
-                                                sizeof(*gradients->input_gradient));
-    if (!gradients->layers || (g->nn && !gradients->input_gradient)) {
-        status = NG_OOM;
-        goto finish;
-    }
-    for (layer = 0; layer < model->layers; layer++) {
-        input_dimensions = ng_graphsage_layer_input(model, layer);
-        gradients->layers[layer].activation_gradient =
-            (double*)calloc(total, sizeof(*gradients->layers[layer].activation_gradient));
-        gradients->layers[layer].aggregation_gradient =
-            (double*)calloc(g->nn * input_dimensions,
-                            sizeof(*gradients->layers[layer].aggregation_gradient));
-        gradients->layers[layer].weight_gradient =
-            (double*)calloc(input_dimensions * model->output_dimensions,
-                            sizeof(*gradients->layers[layer].weight_gradient));
-        gradients->layers[layer].bias_gradient =
-            (double*)calloc(model->output_dimensions,
-                            sizeof(*gradients->layers[layer].bias_gradient));
-        if ((total && !gradients->layers[layer].activation_gradient) ||
-            (g->nn && !gradients->layers[layer].aggregation_gradient) ||
-            (input_dimensions && model->output_dimensions &&
-             !gradients->layers[layer].weight_gradient) ||
-            (model->output_dimensions && !gradients->layers[layer].bias_gradient)) {
+    if (gradients->layers && gradients->layer_count == model->layers) {
+        ng_graphsage_gradient_cache_zero(model, g, gradients);
+    } else {
+        gradients->layer_count = model->layers;
+        gradients->layers = (ng_graphsage_gradient_layer*)calloc(model->layers,
+                                                                 sizeof(*gradients->layers));
+        gradients->input_gradient = (double*)calloc(g->nn * model->input_dimensions,
+                                                    sizeof(*gradients->input_gradient));
+        if (!gradients->layers || (g->nn && !gradients->input_gradient)) {
             status = NG_OOM;
             goto finish;
         }
-    }
-    scale = 1.0 / (double)(row_count * model->output_dimensions);
-    for (i = 0; i < row_count; i++)
-        for (d = 0; d < model->output_dimensions; d++) {
-            size_t offset = rows[i] * model->output_dimensions + d;
-            loss += ng_graphsage_loss_value(prediction[offset], targets[offset], kind) * scale;
-            gradients->layers[model->layers - 1].activation_gradient[offset] =
-                ng_graphsage_loss_gradient(prediction[offset], targets[offset], kind) * scale;
+        for (layer = 0; layer < model->layers; layer++) {
+            input_dimensions = ng_graphsage_layer_input(model, layer);
+            gradients->layers[layer].activation_gradient =
+                (double*)calloc(total, sizeof(*gradients->layers[layer].activation_gradient));
+            gradients->layers[layer].aggregation_gradient =
+                (double*)calloc(g->nn * input_dimensions,
+                                sizeof(*gradients->layers[layer].aggregation_gradient));
+            gradients->layers[layer].weight_gradient =
+                (double*)calloc(input_dimensions * model->output_dimensions,
+                                sizeof(*gradients->layers[layer].weight_gradient));
+            gradients->layers[layer].bias_gradient =
+                (double*)calloc(model->output_dimensions,
+                                sizeof(*gradients->layers[layer].bias_gradient));
+            if ((total && !gradients->layers[layer].activation_gradient) ||
+                (g->nn && !gradients->layers[layer].aggregation_gradient) ||
+                (input_dimensions && model->output_dimensions &&
+                 !gradients->layers[layer].weight_gradient) ||
+                (model->output_dimensions && !gradients->layers[layer].bias_gradient)) {
+                status = NG_OOM;
+                goto finish;
+            }
         }
+    }
+    if (kind == NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY) {
+        scale = 1.0 / (double)row_count;
+        for (i = 0; i < row_count; i++) {
+            size_t offset = rows[i] * model->output_dimensions;
+            loss += ng_graphsage_softmax_row_loss(prediction + offset,
+                                                  targets + offset,
+                                                  model->output_dimensions) * scale;
+            ng_graphsage_softmax_row_gradient(
+                prediction + offset, targets + offset, model->output_dimensions, scale,
+                gradients->layers[model->layers - 1].activation_gradient + offset);
+        }
+    } else {
+        scale = 1.0 / (double)(row_count * model->output_dimensions);
+        for (i = 0; i < row_count; i++)
+            for (d = 0; d < model->output_dimensions; d++) {
+                size_t offset = rows[i] * model->output_dimensions + d;
+                loss += ng_graphsage_loss_value(prediction[offset], targets[offset], kind) * scale;
+                gradients->layers[model->layers - 1].activation_gradient[offset] =
+                    ng_graphsage_loss_gradient(prediction[offset], targets[offset], kind) * scale;
+            }
+    }
     for (layer = model->layers; layer > 0; layer--) {
         size_t index = layer - 1;
         double* previous_gradient;
@@ -3170,6 +3463,7 @@ static ng_status ng_graphsage_gradients(const ng_graphsage_model* model,
                                     gradients->layers[index].activation_gradient,
                                     g->nn, input_dimensions, model->output_dimensions,
                                     model->weights[index],
+                                    subgraph ? &subgraph->layer_outputs[index] : NULL,
                                     gradients->layers[index].aggregation_gradient,
                                     gradients->layers[index].weight_gradient,
                                     gradients->layers[index].bias_gradient);
@@ -3178,6 +3472,7 @@ static ng_status ng_graphsage_gradients(const ng_graphsage_model* model,
         ng_graphsage_backprop_aggregation(&cache.layers[index],
                                           gradients->layers[index].aggregation_gradient,
                                           g->nn, input_dimensions,
+                                          subgraph ? &subgraph->layer_outputs[index] : NULL,
                                           previous_gradient);
     }
     if (out_loss)
@@ -3202,8 +3497,17 @@ static double ng_graphsage_loss_rows(const ng_graphsage_model* model,
     double loss = 0.0;
     ng_graphsage_forward_cache cache = {0};
     if (ng_graphsage_forward(model, g, direction, type, features, prediction,
-                             g->nn * model->output_dimensions, NULL, &cache) != NG_OK)
+                             g->nn * model->output_dimensions, NULL, NULL, NULL, &cache) != NG_OK)
         return -1.0;
+    if (kind == NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY) {
+        for (i = 0; i < row_count; i++) {
+            size_t offset = rows[i] * model->output_dimensions;
+            loss += ng_graphsage_softmax_row_loss(prediction + offset, targets + offset,
+                                                  model->output_dimensions);
+        }
+        ng_graphsage_forward_cache_free(&cache);
+        return row_count ? loss / (double)row_count : 0.0;
+    }
     for (i = 0; i < row_count; i++)
         for (d = 0; d < model->output_dimensions; d++) {
             size_t offset = rows[i] * model->output_dimensions + d;
@@ -3211,6 +3515,159 @@ static double ng_graphsage_loss_rows(const ng_graphsage_model* model,
         }
     ng_graphsage_forward_cache_free(&cache);
     return row_count ? loss / (double)(row_count * model->output_dimensions) : 0.0;
+}
+static ng_status ng_graphsage_metrics_rows(const ng_graphsage_model* model,
+                                           const ng_graph* g,
+                                           ng_direction direction,
+                                           ng_symbol_id type,
+                                           const double* features,
+                                           const double* targets,
+                                           const size_t* rows,
+                                           size_t row_count,
+                                           ng_graphsage_loss_kind kind,
+                                           double* prediction,
+                                           double* accuracy,
+                                           double* precision,
+                                           double* recall) {
+    size_t i, d, total, correct = 0, true_positive = 0, false_positive = 0, false_negative = 0;
+    if (!accuracy || !precision || !recall)
+        return NG_INVALID_ARGUMENT;
+    *accuracy = 0.0;
+    *precision = 0.0;
+    *recall = 0.0;
+    if (kind == NG_GRAPHSAGE_LOSS_MSE || !row_count)
+        return NG_OK;
+    total = g->nn * model->output_dimensions;
+    if (ng_graphsage_forward(model, g, direction, type, features, prediction,
+                             total, NULL, NULL, NULL, NULL) != NG_OK)
+        return NG_INVALID_ARGUMENT;
+    if (kind == NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY) {
+        size_t evaluated = row_count * model->output_dimensions;
+        for (i = 0; i < row_count; i++)
+            for (d = 0; d < model->output_dimensions; d++) {
+                size_t offset = rows[i] * model->output_dimensions + d;
+                int expected = targets[offset] >= 0.5;
+                int actual = 1.0 / (1.0 + exp(-prediction[offset])) >= 0.5;
+                if (actual == expected)
+                    correct++;
+                if (actual && expected)
+                    true_positive++;
+                else if (actual)
+                    false_positive++;
+                else if (expected)
+                    false_negative++;
+            }
+        *accuracy = evaluated ? (double)correct / (double)evaluated : 0.0;
+    } else if (kind == NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY) {
+        for (i = 0; i < row_count; i++) {
+            size_t offset = rows[i] * model->output_dimensions;
+            size_t expected = 0, actual = 0;
+            for (d = 1; d < model->output_dimensions; d++) {
+                if (targets[offset + d] > targets[offset + expected])
+                    expected = d;
+                if (prediction[offset + d] > prediction[offset + actual])
+                    actual = d;
+            }
+            if (actual == expected) {
+                correct++;
+                true_positive++;
+            } else {
+                false_positive++;
+                false_negative++;
+            }
+        }
+        *accuracy = (double)correct / (double)row_count;
+    }
+    *precision = true_positive + false_positive
+                     ? (double)true_positive / (double)(true_positive + false_positive)
+                     : 0.0;
+    *recall = true_positive + false_negative
+                  ? (double)true_positive / (double)(true_positive + false_negative)
+                  : 0.0;
+    return NG_OK;
+}
+static ng_status ng_graphsage_evaluate_rows(const ng_graphsage_model* model,
+                                            const ng_graph* g,
+                                            ng_direction direction,
+                                            ng_symbol_id type,
+                                            const double* features,
+                                            const double* targets,
+                                            const size_t* rows,
+                                            size_t row_count,
+                                            ng_graphsage_loss_kind kind,
+                                            double* prediction,
+                                            double* loss,
+                                            double* accuracy,
+                                            double* precision,
+                                            double* recall) {
+    size_t i, d, total, correct = 0, true_positive = 0, false_positive = 0, false_negative = 0;
+    double value = 0.0;
+    if (!loss || !accuracy || !precision || !recall)
+        return NG_INVALID_ARGUMENT;
+    *loss = 0.0;
+    *accuracy = 0.0;
+    *precision = 0.0;
+    *recall = 0.0;
+    if (!row_count)
+        return NG_OK;
+    total = g->nn * model->output_dimensions;
+    if (ng_graphsage_forward(model, g, direction, type, features, prediction,
+                             total, NULL, NULL, NULL, NULL) != NG_OK)
+        return NG_INVALID_ARGUMENT;
+    if (kind == NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY) {
+        for (i = 0; i < row_count; i++) {
+            size_t offset = rows[i] * model->output_dimensions;
+            size_t expected = 0, actual = 0;
+            value += ng_graphsage_softmax_row_loss(prediction + offset,
+                                                   targets + offset,
+                                                   model->output_dimensions);
+            for (d = 1; d < model->output_dimensions; d++) {
+                if (targets[offset + d] > targets[offset + expected])
+                    expected = d;
+                if (prediction[offset + d] > prediction[offset + actual])
+                    actual = d;
+            }
+            if (actual == expected) {
+                correct++;
+                true_positive++;
+            } else {
+                false_positive++;
+                false_negative++;
+            }
+        }
+        *loss = value / (double)row_count;
+        *accuracy = (double)correct / (double)row_count;
+    } else {
+        for (i = 0; i < row_count; i++)
+            for (d = 0; d < model->output_dimensions; d++) {
+                size_t offset = rows[i] * model->output_dimensions + d;
+                value += ng_graphsage_loss_value(prediction[offset], targets[offset], kind);
+                if (kind == NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY) {
+                    int expected = targets[offset] >= 0.5;
+                    int actual = 1.0 / (1.0 + exp(-prediction[offset])) >= 0.5;
+                    if (actual == expected)
+                        correct++;
+                    if (actual && expected)
+                        true_positive++;
+                    else if (actual)
+                        false_positive++;
+                    else if (expected)
+                        false_negative++;
+                }
+            }
+        *loss = value / (double)(row_count * model->output_dimensions);
+        if (kind == NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY)
+            *accuracy = (double)correct / (double)(row_count * model->output_dimensions);
+    }
+    if (kind != NG_GRAPHSAGE_LOSS_MSE) {
+        *precision = true_positive + false_positive
+                         ? (double)true_positive / (double)(true_positive + false_positive)
+                         : 0.0;
+        *recall = true_positive + false_negative
+                      ? (double)true_positive / (double)(true_positive + false_negative)
+                      : 0.0;
+    }
+    return NG_OK;
 }
 ng_status ng_test_graphsage_finite_difference_gradient_check(const ng_graph* g,
                                                              ng_direction direction,
@@ -3220,7 +3677,9 @@ ng_status ng_test_graphsage_finite_difference_gradient_check(const ng_graph* g,
                                                              int mini_batch,
                                                              ng_graphsage_loss_kind kind,
                                                              double* out_max_delta) {
-    ng_graphsage_config config = {layers, 2, 2, 1, normalize_features ? 1 : 0, 123};
+    ng_graphsage_config config = {layers, 2,
+                                  kind == NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY ? 3 : 2,
+                                  1, normalize_features ? 1 : 0, 123};
     ng_graphsage_model* model = NULL;
     ng_graphsage_gradient_cache gradients = {0};
     double *features = NULL, *targets = NULL, *prediction = NULL;
@@ -3231,7 +3690,7 @@ ng_status ng_test_graphsage_finite_difference_gradient_check(const ng_graph* g,
     ng_status status;
     if (!g || !layers || normalize_features < 0 || normalize_features > 1 ||
         mini_batch < 0 || mini_batch > 1 ||
-        kind > NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY || !out_max_delta ||
+        kind > NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY || !out_max_delta ||
         direction > NG_DIRECTION_EITHER ||
         !ng_analytics_symbol_ok(g, type))
         return NG_INVALID_ARGUMENT;
@@ -3247,12 +3706,17 @@ ng_status ng_test_graphsage_finite_difference_gradient_check(const ng_graph* g,
         rows[i] = i;
         features[i * 2] = 0.25 + (double)(i % 3) * 0.5;
         features[i * 2 + 1] = 1.0 - (double)(i % 5) * 0.1;
-        if (kind == NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY) {
-            targets[i * 2] = (double)(i % 2);
-            targets[i * 2 + 1] = (double)((i + 1) % 2);
+        if (kind == NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY) {
+            size_t d;
+            for (d = 0; d < config.output_dimensions; d++)
+                targets[i * config.output_dimensions + d] =
+                    d == i % config.output_dimensions ? 1.0 : 0.0;
+        } else if (kind == NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY) {
+            targets[i * config.output_dimensions] = (double)(i % 2);
+            targets[i * config.output_dimensions + 1] = (double)((i + 1) % 2);
         } else {
-            targets[i * 2] = 0.15 + (double)(i % 4) * 0.07;
-            targets[i * 2 + 1] = -0.2 + (double)(i % 3) * 0.11;
+            targets[i * config.output_dimensions] = 0.15 + (double)(i % 4) * 0.07;
+            targets[i * config.output_dimensions + 1] = -0.2 + (double)(i % 3) * 0.11;
         }
     }
     status = ng_graphsage_model_create(&config, &model);
@@ -3265,7 +3729,7 @@ ng_status ng_test_graphsage_finite_difference_gradient_check(const ng_graph* g,
     }
     status = ng_graphsage_gradients(model, g, direction, type, features, targets,
                                     rows, mini_batch && g->nn > 2 ? 3 : g->nn,
-                                    kind, prediction, &gradients, NULL);
+                                    kind, prediction, NULL, NULL, &gradients, NULL);
     if (status != NG_OK)
         goto finish;
     for (layer = 0; layer < model->layers; layer++) {
@@ -3319,6 +3783,194 @@ ng_status ng_test_graphsage_single_layer_mse_gradient_check(const ng_graph* g,
     return ng_test_graphsage_finite_difference_gradient_check(
         g, direction, type, 1, 1, 0, NG_GRAPHSAGE_LOSS_MSE, out_max_delta);
 }
+ng_status ng_test_graphsage_evaluation_equivalence(const ng_graph* g,
+                                                   ng_direction direction,
+                                                   ng_symbol_id type,
+                                                   ng_graphsage_loss_kind kind,
+                                                   double* out_max_delta) {
+    ng_graphsage_config config = {3, 2,
+                                  kind == NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY ? 3 : 2,
+                                  1, 1, 321};
+    ng_graphsage_model* model = NULL;
+    double *features = NULL, *targets = NULL, *prediction = NULL;
+    size_t* rows = NULL;
+    double optimized_loss, optimized_accuracy, optimized_precision, optimized_recall;
+    double reference_loss, reference_accuracy, reference_precision, reference_recall;
+    double max_delta = 0.0;
+    size_t i;
+    ng_status status;
+    if (!g || !out_max_delta || direction > NG_DIRECTION_EITHER ||
+        kind > NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY ||
+        !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    features = (double*)malloc(g->nn * config.input_dimensions * sizeof(*features));
+    targets = (double*)malloc(g->nn * config.output_dimensions * sizeof(*targets));
+    prediction = (double*)malloc(g->nn * config.output_dimensions * sizeof(*prediction));
+    rows = (size_t*)malloc(g->nn * sizeof(*rows));
+    if (g->nn && (!features || !targets || !prediction || !rows)) {
+        status = NG_OOM;
+        goto finish;
+    }
+    for (i = 0; i < g->nn; i++) {
+        rows[i] = i;
+        features[i * 2] = 0.4 + (double)(i % 4) * 0.2;
+        features[i * 2 + 1] = 0.1 + (double)(i % 3) * 0.3;
+        if (kind == NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY) {
+            size_t d;
+            for (d = 0; d < config.output_dimensions; d++)
+                targets[i * config.output_dimensions + d] =
+                    d == (i + 1) % config.output_dimensions ? 1.0 : 0.0;
+        } else if (kind == NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY) {
+            targets[i * config.output_dimensions] = (double)(i % 2);
+            targets[i * config.output_dimensions + 1] = (double)((i + 1) % 2);
+        } else {
+            targets[i * config.output_dimensions] = 0.2 + (double)(i % 3) * 0.05;
+            targets[i * config.output_dimensions + 1] = -0.1 + (double)(i % 2) * 0.05;
+        }
+    }
+    status = ng_graphsage_model_create(&config, &model);
+    if (status != NG_OK)
+        goto finish;
+    status = ng_graphsage_evaluate_rows(model, g, direction, type, features, targets,
+                                        rows, g->nn, kind, prediction,
+                                        &optimized_loss, &optimized_accuracy,
+                                        &optimized_precision, &optimized_recall);
+    if (status != NG_OK)
+        goto finish;
+    reference_loss = ng_graphsage_loss_rows(model, g, direction, type, features,
+                                           targets, rows, g->nn, kind, prediction);
+    status = ng_graphsage_metrics_rows(model, g, direction, type, features, targets,
+                                       rows, g->nn, kind, prediction,
+                                       &reference_accuracy, &reference_precision,
+                                       &reference_recall);
+    if (status != NG_OK || reference_loss < 0.0)
+        goto finish;
+    max_delta = fabs(optimized_loss - reference_loss);
+    if (fabs(optimized_accuracy - reference_accuracy) > max_delta)
+        max_delta = fabs(optimized_accuracy - reference_accuracy);
+    if (fabs(optimized_precision - reference_precision) > max_delta)
+        max_delta = fabs(optimized_precision - reference_precision);
+    if (fabs(optimized_recall - reference_recall) > max_delta)
+        max_delta = fabs(optimized_recall - reference_recall);
+    *out_max_delta = max_delta;
+finish:
+    ng_graphsage_model_free(model);
+    free(features);
+    free(targets);
+    free(prediction);
+    free(rows);
+    return status;
+}
+static ng_status ng_graphsage_train_reference_uncached(ng_graphsage_model* model,
+                                                       const ng_graph* g,
+                                                       ng_direction direction,
+                                                       ng_symbol_id type,
+                                                       const double* features,
+                                                       const double* targets,
+                                                       const ng_graphsage_training_options* options) {
+    double* prediction = NULL;
+    size_t* rows = NULL;
+    size_t validation_count, train_count, batch_size, epoch, start, i, layer, j;
+    ng_status status = NG_OK;
+    prediction = (double*)malloc(g->nn * model->output_dimensions * sizeof(*prediction));
+    rows = (size_t*)malloc(g->nn * sizeof(*rows));
+    if (g->nn && (!prediction || !rows)) {
+        status = NG_OOM;
+        goto finish;
+    }
+    validation_count = (size_t)((double)g->nn * options->validation_split);
+    train_count = g->nn - validation_count;
+    batch_size = options->batch_size ? options->batch_size : train_count;
+    for (i = 0; i < g->nn; i++)
+        rows[i] = i;
+    for (epoch = 0; epoch < options->epochs; epoch++) {
+        for (start = 0; start < train_count; start += batch_size) {
+            size_t current_count = train_count - start < batch_size ? train_count - start : batch_size;
+            ng_graphsage_gradient_cache gradients = {0};
+            for (i = 0; i < current_count; i++) {
+                size_t position = start + i;
+                size_t swap = (size_t)(ng_embedding_random(options->seed + epoch * UINT64_C(1315423911) +
+                                                            position) % train_count);
+                size_t tmp = rows[position];
+                rows[position] = rows[swap];
+                rows[swap] = tmp;
+            }
+            status = ng_graphsage_gradients(model, g, direction, type, features, targets,
+                                            rows + start, current_count, options->loss,
+                                            prediction, NULL, NULL, &gradients, NULL);
+            if (status != NG_OK) {
+                ng_graphsage_gradient_cache_free(&gradients);
+                goto finish;
+            }
+            for (layer = 0; layer < model->layers; layer++) {
+                size_t input = ng_graphsage_layer_input(model, layer);
+                size_t count = input * model->output_dimensions;
+                for (j = 0; j < count; j++)
+                    model->weights[layer][j] -=
+                        options->learning_rate * gradients.layers[layer].weight_gradient[j];
+                for (j = 0; j < model->output_dimensions; j++)
+                    model->biases[layer][j] -=
+                        options->learning_rate * gradients.layers[layer].bias_gradient[j];
+            }
+            ng_graphsage_gradient_cache_free(&gradients);
+        }
+    }
+finish:
+    free(prediction);
+    free(rows);
+    return status;
+}
+ng_status ng_test_graphsage_cached_training_equivalence(const ng_graph* g,
+                                                       ng_direction direction,
+                                                       ng_symbol_id type,
+                                                       double* out_max_delta) {
+    const double features[10] = {1.0, 0.0, 0.0, 1.0, 1.0,
+                                 1.0, 0.5, 0.5, 0.2, 0.8};
+    const double targets[15] = {0.2, 0.1, 0.0, 0.1, 0.2,
+                                0.0, 0.2, 0.1, 0.1, 0.0,
+                                0.2, 0.1, 0.0, 0.1, 0.2};
+    ng_graphsage_config config = {3, 2, 3, 1, 1, 77};
+    ng_graphsage_training_options options = {2, 0.01, 2, 0.2, 17,
+                                             NG_GRAPHSAGE_LOSS_MSE};
+    ng_graphsage_training_report report;
+    ng_graphsage_model *optimized = NULL, *reference = NULL;
+    double optimized_out[15], reference_out[15], max_delta = 0.0;
+    size_t i, count = 0;
+    ng_status status;
+    if (!g || !out_max_delta || direction > NG_DIRECTION_EITHER ||
+        !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    status = ng_graphsage_model_create(&config, &optimized);
+    if (status != NG_OK)
+        goto finish;
+    status = ng_graphsage_model_create(&config, &reference);
+    if (status != NG_OK)
+        goto finish;
+    status = ng_graphsage_model_train_ex(optimized, g, direction, type, features,
+                                         targets, &options, &report);
+    if (status != NG_OK)
+        goto finish;
+    status = ng_graphsage_train_reference_uncached(reference, g, direction, type,
+                                                  features, targets, &options);
+    if (status != NG_OK)
+        goto finish;
+    status = ng_graphsage_model_infer(optimized, g, direction, type, features,
+                                      optimized_out, 15, &count);
+    if (status != NG_OK)
+        goto finish;
+    status = ng_graphsage_model_infer(reference, g, direction, type, features,
+                                      reference_out, 15, &count);
+    if (status != NG_OK)
+        goto finish;
+    for (i = 0; i < 15; i++)
+        if (fabs(optimized_out[i] - reference_out[i]) > max_delta)
+            max_delta = fabs(optimized_out[i] - reference_out[i]);
+    *out_max_delta = max_delta;
+finish:
+    ng_graphsage_model_free(optimized);
+    ng_graphsage_model_free(reference);
+    return status;
+}
 ng_status ng_graphsage_model_train_ex_diagnostics(
     ng_graphsage_model* model,
     const ng_graph* g,
@@ -3331,13 +3983,15 @@ ng_status ng_graphsage_model_train_ex_diagnostics(
     ng_graphsage_training_diagnostics* diagnostics) {
     double* prediction;
     size_t* rows;
+    ng_graphsage_forward_cache sampling_cache = {0};
+    ng_graphsage_gradient_cache gradients = {0};
     size_t train_count, validation_count, batch_size, epoch, start, i, layer, j, input, count;
     double previous_epoch_loss = 0.0;
     int have_previous_epoch_loss = 0;
     if (!model || !g || !features || !targets || !options || !options->epochs ||
         options->learning_rate <= 0.0 || options->validation_split < 0.0 ||
         options->validation_split >= 1.0 || direction > NG_DIRECTION_EITHER ||
-        !ng_analytics_symbol_ok(g, type) || options->loss > NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY)
+        !ng_analytics_symbol_ok(g, type) || options->loss > NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY)
         return NG_INVALID_ARGUMENT;
     if (diagnostics) {
         diagnostics->epoch_count = 0;
@@ -3347,12 +4001,30 @@ ng_status ng_graphsage_model_train_ex_diagnostics(
         diagnostics->validation_start = 0;
         diagnostics->validation_row_count = 0;
         diagnostics->validation_seed = options->seed;
+        diagnostics->batch_count = 0;
+        diagnostics->cached_forward_reuses = 0;
+        diagnostics->sampled_neighbor_count = 0;
+        diagnostics->gradient_buffer_bytes = ng_graphsage_gradient_cache_bytes(model, g);
+        diagnostics->subgraph_node_references = 0;
+        diagnostics->subgraph_edge_references = 0;
     }
     if (options->loss == NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY) {
         size_t target_count = g->nn * model->output_dimensions;
         for (size_t i = 0; i < target_count; i++)
             if (targets[i] < 0.0 || targets[i] > 1.0)
                 return NG_INVALID_ARGUMENT;
+    } else if (options->loss == NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY) {
+        for (size_t i = 0; i < g->nn; i++) {
+            double sum = 0.0;
+            for (size_t d = 0; d < model->output_dimensions; d++) {
+                double target = targets[i * model->output_dimensions + d];
+                if (target < 0.0 || target > 1.0)
+                    return NG_INVALID_ARGUMENT;
+                sum += target;
+            }
+            if (fabs(sum - 1.0) > 0.000001)
+                return NG_INVALID_ARGUMENT;
+        }
     }
     validation_count = (size_t)((double)g->nn * options->validation_split);
     train_count = g->nn - validation_count;
@@ -3366,6 +4038,18 @@ ng_status ng_graphsage_model_train_ex_diagnostics(
         free(prediction);
         return NG_OOM;
     }
+    {
+        ng_status status = ng_graphsage_sampling_cache_prepare(model, g, direction, type,
+                                                               &sampling_cache);
+        if (status != NG_OK) {
+            free(rows);
+            free(prediction);
+            return status;
+        }
+    }
+    if (diagnostics)
+        for (i = 0; i < sampling_cache.layer_count; i++)
+            diagnostics->sampled_neighbor_count += sampling_cache.layers[i].neighbor_count;
     for (i = 0; i < g->nn; i++)
         rows[i] = i;
     if (diagnostics) {
@@ -3390,11 +4074,25 @@ ng_status ng_graphsage_model_train_ex_diagnostics(
                 rows[position] = rows[swap];
                 rows[swap] = tmp;
             }
-            ng_graphsage_gradient_cache gradients = {0};
-            ng_status status = ng_graphsage_gradients(
-                model, g, direction, type, features, targets, rows + start,
-                current_count, options->loss, prediction, &gradients, NULL);
+            ng_graphsage_subgraph subgraph = {0};
+            ng_status status = ng_graphsage_subgraph_build(g, &sampling_cache,
+                                                           rows + start, current_count,
+                                                           &subgraph);
+            if (status == NG_OK)
+                status = ng_graphsage_gradients(
+                    model, g, direction, type, features, targets, rows + start,
+                    current_count, options->loss, prediction, &sampling_cache,
+                    &subgraph, &gradients, NULL);
+            if (diagnostics) {
+                diagnostics->batch_count++;
+                diagnostics->cached_forward_reuses++;
+                diagnostics->subgraph_node_references += subgraph.node_references;
+                diagnostics->subgraph_edge_references += subgraph.edge_references;
+            }
+            ng_graphsage_subgraph_free(&subgraph);
             if (status != NG_OK) {
+                ng_graphsage_gradient_cache_free(&gradients);
+                ng_graphsage_forward_cache_free(&sampling_cache);
                 free(rows);
                 free(prediction);
                 return status;
@@ -3409,7 +4107,6 @@ ng_status ng_graphsage_model_train_ex_diagnostics(
                     model->biases[layer][j] -= options->learning_rate *
                                                gradients.layers[layer].bias_gradient[j];
             }
-            ng_graphsage_gradient_cache_free(&gradients);
         }
         if (diagnostics) {
             double training_loss = ng_graphsage_loss_rows(model, g, direction, type, features,
@@ -3425,6 +4122,8 @@ ng_status ng_graphsage_model_train_ex_diagnostics(
             if (training_loss < 0.0 || validation_loss < 0.0) {
                 free(rows);
                 free(prediction);
+                ng_graphsage_gradient_cache_free(&gradients);
+                ng_graphsage_forward_cache_free(&sampling_cache);
                 return NG_INVALID_ARGUMENT;
             }
             if (diagnostics->epoch_count < diagnostics->epoch_capacity) {
@@ -3450,18 +4149,45 @@ ng_status ng_graphsage_model_train_ex_diagnostics(
         }
     }
     if (report) {
-        report->training_loss = ng_graphsage_loss_rows(model, g, direction, type, features, targets,
-                                                       rows, train_count, options->loss, prediction);
         report->validation_samples = validation_count;
         report->training_samples = train_count;
-        report->validation_loss = validation_count
-                                      ? ng_graphsage_loss_rows(model, g, direction, type, features,
-                                                               targets, rows + train_count,
-                                                               validation_count, options->loss, prediction)
-                                      : 0.0;
+        if (ng_graphsage_evaluate_rows(model, g, direction, type, features, targets,
+                                       rows, train_count, options->loss, prediction,
+                                       &report->training_loss,
+                                       &report->training_accuracy,
+                                       &report->training_precision,
+                                       &report->training_recall) != NG_OK) {
+            free(rows);
+            free(prediction);
+            ng_graphsage_gradient_cache_free(&gradients);
+            ng_graphsage_forward_cache_free(&sampling_cache);
+            return NG_INVALID_ARGUMENT;
+        }
+        if (validation_count) {
+            if (ng_graphsage_evaluate_rows(model, g, direction, type, features, targets,
+                                           rows + train_count, validation_count,
+                                           options->loss, prediction,
+                                           &report->validation_loss,
+                                           &report->validation_accuracy,
+                                           &report->validation_precision,
+                                           &report->validation_recall) != NG_OK) {
+                free(rows);
+                free(prediction);
+                ng_graphsage_gradient_cache_free(&gradients);
+                ng_graphsage_forward_cache_free(&sampling_cache);
+                return NG_INVALID_ARGUMENT;
+            }
+        } else {
+            report->validation_loss = 0.0;
+            report->validation_accuracy = 0.0;
+            report->validation_precision = 0.0;
+            report->validation_recall = 0.0;
+        }
     }
     free(rows);
     free(prediction);
+    ng_graphsage_gradient_cache_free(&gradients);
+    ng_graphsage_forward_cache_free(&sampling_cache);
     return NG_OK;
 }
 ng_status ng_graphsage_model_train_ex(ng_graphsage_model* model,
@@ -3474,6 +4200,96 @@ ng_status ng_graphsage_model_train_ex(ng_graphsage_model* model,
                                       ng_graphsage_training_report* report) {
     return ng_graphsage_model_train_ex_diagnostics(model, g, direction, type, features,
                                                    targets, options, report, NULL);
+}
+ng_status ng_graphsage_model_predict_probabilities(const ng_graphsage_model* model,
+                                                   const ng_graph* g,
+                                                   ng_direction direction,
+                                                   ng_symbol_id type,
+                                                   const double* features,
+                                                   double* probabilities,
+                                                   size_t capacity,
+                                                   size_t* out_count) {
+    double* logits = NULL;
+    size_t total, i, d;
+    ng_status status;
+    if (!model || !g || !features || direction > NG_DIRECTION_EITHER ||
+        !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    total = g->nn * model->output_dimensions;
+    if (capacity < total || (total && !probabilities)) {
+        if (out_count)
+            *out_count = g->nn;
+        return NG_LIMIT;
+    }
+    logits = (double*)malloc(total * sizeof(*logits));
+    if (total && !logits)
+        return NG_OOM;
+    status = ng_graphsage_forward(model, g, direction, type, features, logits,
+                                  total, out_count, NULL, NULL, NULL);
+    if (status != NG_OK) {
+        free(logits);
+        return status;
+    }
+    for (i = 0; i < g->nn; i++) {
+        size_t offset = i * model->output_dimensions;
+        double max_value = logits[offset], sum = 0.0;
+        for (d = 1; d < model->output_dimensions; d++)
+            if (logits[offset + d] > max_value)
+                max_value = logits[offset + d];
+        for (d = 0; d < model->output_dimensions; d++)
+            sum += exp(logits[offset + d] - max_value);
+        for (d = 0; d < model->output_dimensions; d++)
+            probabilities[offset + d] = exp(logits[offset + d] - max_value) / sum;
+    }
+    free(logits);
+    return NG_OK;
+}
+ng_status ng_graphsage_model_predict_classes(const ng_graphsage_model* model,
+                                             const ng_graph* g,
+                                             ng_direction direction,
+                                             ng_symbol_id type,
+                                             const double* features,
+                                             size_t* classes,
+                                             double* confidence,
+                                             size_t capacity,
+                                             size_t* out_count) {
+    double* probabilities = NULL;
+    size_t total, i, d;
+    ng_status status;
+    if (!model || !g || !features || !classes || direction > NG_DIRECTION_EITHER ||
+        !ng_analytics_symbol_ok(g, type))
+        return NG_INVALID_ARGUMENT;
+    if (capacity < g->nn) {
+        if (out_count)
+            *out_count = g->nn;
+        return NG_LIMIT;
+    }
+    total = g->nn * model->output_dimensions;
+    probabilities = (double*)malloc(total * sizeof(*probabilities));
+    if (total && !probabilities)
+        return NG_OOM;
+    status = ng_graphsage_model_predict_probabilities(model, g, direction, type,
+                                                      features, probabilities,
+                                                      total, out_count);
+    if (status != NG_OK) {
+        free(probabilities);
+        return status;
+    }
+    for (i = 0; i < g->nn; i++) {
+        size_t offset = i * model->output_dimensions;
+        size_t best = 0;
+        double score = probabilities[offset];
+        for (d = 1; d < model->output_dimensions; d++)
+            if (probabilities[offset + d] > score) {
+                best = d;
+                score = probabilities[offset + d];
+            }
+        classes[i] = best;
+        if (confidence)
+            confidence[i] = score;
+    }
+    free(probabilities);
+    return NG_OK;
 }
 static int ng_graphsage_write(FILE* file, const void* data, size_t size) {
     return fwrite(data, 1, size, file) == size;
@@ -3586,6 +4402,779 @@ ng_status ng_vector_search_cosine(const double* vectors,
     if (out_count)
         *out_count = count;
     return NG_OK;
+}
+static double ng_vector_projection(size_t bit, size_t dimension) {
+    uint64_t value = ng_embedding_random(UINT64_C(0x9e3779b97f4a7c15) +
+                                         (uint64_t)bit * UINT64_C(0xbf58476d1ce4e5b9) +
+                                         (uint64_t)dimension * UINT64_C(0x94d049bb133111eb));
+    return (value & UINT64_C(1)) ? 1.0 : -1.0;
+}
+static uint64_t ng_vector_signature(const double* vector, size_t dimensions) {
+    size_t bit, d;
+    uint64_t signature = 0;
+    for (bit = 0; bit < 64; bit++) {
+        double projection = 0.0;
+        for (d = 0; d < dimensions; d++)
+            projection += vector[d] * ng_vector_projection(bit, d);
+        if (projection >= 0.0)
+            signature |= UINT64_C(1) << bit;
+    }
+    return signature;
+}
+static unsigned ng_vector_hamming(uint64_t value) {
+    unsigned count = 0;
+    while (value) {
+        value &= value - 1;
+        count++;
+    }
+    return count;
+}
+static double ng_vector_cosine_score(const double* vectors,
+                                     size_t dimensions,
+                                     size_t index,
+                                     const double* query) {
+    size_t d;
+    double dot = 0.0, norm = 0.0, qnorm = 0.0;
+    for (d = 0; d < dimensions; d++) {
+        double value = vectors[index * dimensions + d];
+        dot += value * query[d];
+        norm += value * value;
+        qnorm += query[d] * query[d];
+    }
+    return norm > 0.0 && qnorm > 0.0 ? dot / sqrt(norm * qnorm) : 0.0;
+}
+static void ng_vector_sort_scores_desc(ng_vector_score* scores, size_t count) {
+    size_t i, j;
+    for (i = 0; i < count; i++)
+        for (j = i + 1; j < count; j++)
+            if (scores[j].score > scores[i].score ||
+                (scores[j].score == scores[i].score && scores[j].index < scores[i].index)) {
+                ng_vector_score tmp = scores[i];
+                scores[i] = scores[j];
+                scores[j] = tmp;
+            }
+}
+static size_t ng_vector_hnsw_default_m(size_t vector_count) {
+    if (vector_count <= 1)
+        return 0;
+    return vector_count - 1 < 8 ? vector_count - 1 : 8;
+}
+static size_t ng_vector_hnsw_level_for(size_t index) {
+    uint64_t value = ng_embedding_random(UINT64_C(0x48a5f2d1b73c9e31) +
+                                         (uint64_t)index * UINT64_C(0x9e3779b97f4a7c15));
+    size_t level = 0;
+    while (level < 8 && (value & UINT64_C(3)) == 0) {
+        level++;
+        value >>= 2;
+    }
+    return level;
+}
+static size_t ng_vector_hnsw_slot(const ng_vector_index* index,
+                                  size_t level,
+                                  size_t node,
+                                  size_t offset) {
+    return (level * index->vector_count + node) * index->hnsw_m + offset;
+}
+static size_t ng_vector_hnsw_count_slot(const ng_vector_index* index,
+                                        size_t level,
+                                        size_t node) {
+    return level * index->vector_count + node;
+}
+static void ng_vector_hnsw_insert_neighbor(ng_vector_index* index,
+                                           size_t level,
+                                           size_t node,
+                                           size_t neighbor) {
+    size_t count_slot = ng_vector_hnsw_count_slot(index, level, node);
+    size_t count = index->hnsw_counts[count_slot], i, worst = 0;
+    double score, worst_score;
+    if (!index->hnsw_m || node == neighbor)
+        return;
+    for (i = 0; i < count; i++)
+        if (index->hnsw_neighbors[ng_vector_hnsw_slot(index, level, node, i)] == neighbor)
+            return;
+    if (count < index->hnsw_m) {
+        index->hnsw_neighbors[ng_vector_hnsw_slot(index, level, node, count)] = neighbor;
+        index->hnsw_counts[count_slot]++;
+        return;
+    }
+    worst_score = ng_vector_cosine_score(index->vectors, index->dimensions,
+                                         index->hnsw_neighbors[ng_vector_hnsw_slot(index, level,
+                                                                                  node, 0)],
+                                         index->vectors + node * index->dimensions);
+    for (i = 1; i < count; i++) {
+        double candidate_score =
+            ng_vector_cosine_score(index->vectors, index->dimensions,
+                                   index->hnsw_neighbors[ng_vector_hnsw_slot(index, level,
+                                                                            node, i)],
+                                   index->vectors + node * index->dimensions);
+        if (candidate_score < worst_score) {
+            worst = i;
+            worst_score = candidate_score;
+        }
+    }
+    score = ng_vector_cosine_score(index->vectors, index->dimensions, neighbor,
+                                   index->vectors + node * index->dimensions);
+    if (score > worst_score)
+        index->hnsw_neighbors[ng_vector_hnsw_slot(index, level, node, worst)] = neighbor;
+}
+static ng_status ng_vector_index_build_hnsw(ng_vector_index* index,
+                                            const ng_vector_hnsw_config* config) {
+    size_t i, j, level, total_counts, total_neighbors;
+    size_t m;
+    if (!index || !index->vector_count)
+        return NG_INVALID_ARGUMENT;
+    m = config && config->m ? config->m : ng_vector_hnsw_default_m(index->vector_count);
+    if (m >= index->vector_count)
+        m = index->vector_count - 1;
+    index->hnsw_m = m;
+    index->hnsw_ef_construction = config && config->ef_construction
+                                      ? config->ef_construction
+                                      : (m * 2 > 16 ? m * 2 : 16);
+    index->hnsw_ef_search = config && config->ef_search
+                                ? config->ef_search
+                                : (m * 2 > 16 ? m * 2 : 16);
+    if (index->hnsw_ef_construction > index->vector_count)
+        index->hnsw_ef_construction = index->vector_count;
+    if (index->hnsw_ef_search > index->vector_count)
+        index->hnsw_ef_search = index->vector_count;
+    index->hnsw_entry = 0;
+    index->hnsw_max_level = 0;
+    index->hnsw_levels = (size_t*)calloc(index->vector_count, sizeof(*index->hnsw_levels));
+    if (!index->hnsw_levels)
+        return NG_OOM;
+    for (i = 0; i < index->vector_count; i++) {
+        index->hnsw_levels[i] = ng_vector_hnsw_level_for(i);
+        if (index->hnsw_levels[i] > index->hnsw_max_level) {
+            index->hnsw_max_level = index->hnsw_levels[i];
+            index->hnsw_entry = i;
+        }
+    }
+    if (!m)
+        return NG_OK;
+    if (index->hnsw_max_level + 1 > SIZE_MAX / index->vector_count)
+        return NG_LIMIT;
+    total_counts = (index->hnsw_max_level + 1) * index->vector_count;
+    if (total_counts > SIZE_MAX / m)
+        return NG_LIMIT;
+    total_neighbors = total_counts * m;
+    index->hnsw_counts = (size_t*)calloc(total_counts, sizeof(*index->hnsw_counts));
+    index->hnsw_neighbors = (size_t*)calloc(total_neighbors, sizeof(*index->hnsw_neighbors));
+    if (!index->hnsw_counts || !index->hnsw_neighbors)
+        return NG_OOM;
+    for (i = 0; i < index->vector_count; i++) {
+        for (level = 0; level <= index->hnsw_levels[i]; level++) {
+            ng_vector_score* best = NULL;
+            size_t kept = 0;
+            best = (ng_vector_score*)malloc(index->hnsw_ef_construction * sizeof(*best));
+            if (index->hnsw_ef_construction && !best)
+                return NG_OOM;
+            for (j = 0; j < i; j++) {
+                double score;
+                if (index->hnsw_levels[j] < level)
+                    continue;
+                score = ng_vector_cosine_score(index->vectors, index->dimensions, j,
+                                               index->vectors + i * index->dimensions);
+                if (kept < index->hnsw_ef_construction)
+                    best[kept++] = (ng_vector_score){j, score};
+                else {
+                    size_t worst = 0, k;
+                    for (k = 1; k < kept; k++)
+                        if (best[k].score < best[worst].score)
+                            worst = k;
+                    if (score > best[worst].score)
+                        best[worst] = (ng_vector_score){j, score};
+                }
+            }
+            ng_vector_sort_scores_desc(best, kept);
+            if (kept > m)
+                kept = m;
+            for (j = 0; j < kept; j++) {
+                ng_vector_hnsw_insert_neighbor(index, level, i, best[j].index);
+                ng_vector_hnsw_insert_neighbor(index, level, best[j].index, i);
+            }
+            free(best);
+        }
+    }
+    return NG_OK;
+}
+static ng_status ng_vector_index_build_ann(ng_vector_index* index) {
+    size_t i, j, kept;
+    if (!index || !index->vector_count)
+        return NG_INVALID_ARGUMENT;
+    index->ann_degree = index->vector_count > 1
+                            ? (index->vector_count - 1 < 8 ? index->vector_count - 1 : 8)
+                            : 0;
+    if (!index->ann_degree)
+        return NG_OK;
+    index->ann_neighbors =
+        (size_t*)malloc(index->vector_count * index->ann_degree * sizeof(*index->ann_neighbors));
+    if (!index->ann_neighbors)
+        return NG_OOM;
+    for (i = 0; i < index->vector_count; i++) {
+        ng_vector_score best[8];
+        kept = 0;
+        for (j = 0; j < index->vector_count; j++) {
+            double score;
+            if (i == j)
+                continue;
+            score = ng_vector_cosine_score(index->vectors, index->dimensions, j,
+                                           index->vectors + i * index->dimensions);
+            if (kept < index->ann_degree)
+                best[kept++] = (ng_vector_score){j, score};
+            else {
+                size_t worst = 0, k;
+                for (k = 1; k < kept; k++)
+                    if (best[k].score < best[worst].score)
+                        worst = k;
+                if (score > best[worst].score)
+                    best[worst] = (ng_vector_score){j, score};
+            }
+        }
+        for (j = 0; j < kept; j++)
+            index->ann_neighbors[i * index->ann_degree + j] = best[j].index;
+    }
+    return NG_OK;
+}
+ng_status ng_vector_index_create(const double* vectors,
+                                 size_t vector_count,
+                                 size_t dimensions,
+                                 ng_vector_index** out) {
+    return ng_vector_index_create_hnsw(vectors, vector_count, dimensions, NULL, out);
+}
+ng_status ng_vector_index_create_hnsw(const double* vectors,
+                                      size_t vector_count,
+                                      size_t dimensions,
+                                      const ng_vector_hnsw_config* config,
+                                      ng_vector_index** out) {
+    ng_vector_index* index;
+    ng_status status;
+    size_t total;
+    if (!vectors || !vector_count || !dimensions || !out)
+        return NG_INVALID_ARGUMENT;
+    if (vector_count > SIZE_MAX / dimensions ||
+        vector_count * dimensions > SIZE_MAX / sizeof(double))
+        return NG_LIMIT;
+    total = vector_count * dimensions;
+    index = (ng_vector_index*)calloc(1, sizeof(*index));
+    if (!index)
+        return NG_OOM;
+    index->vectors = (double*)malloc(total * sizeof(*index->vectors));
+    index->signatures = (uint64_t*)malloc(vector_count * sizeof(*index->signatures));
+    if ((total && !index->vectors) || !index->signatures) {
+        free(index->signatures);
+        free(index->vectors);
+        free(index);
+        return NG_OOM;
+    }
+    memcpy(index->vectors, vectors, total * sizeof(*index->vectors));
+    index->vector_count = vector_count;
+    index->dimensions = dimensions;
+    for (size_t i = 0; i < vector_count; i++)
+        index->signatures[i] = ng_vector_signature(vectors + i * dimensions, dimensions);
+    status = ng_vector_index_build_ann(index);
+    if (status != NG_OK) {
+        ng_vector_index_free(index);
+        return status;
+    }
+    status = ng_vector_index_build_hnsw(index, config);
+    if (status != NG_OK) {
+        ng_vector_index_free(index);
+        return status;
+    }
+    *out = index;
+    return NG_OK;
+}
+void ng_vector_index_free(ng_vector_index* index) {
+    if (!index)
+        return;
+    free(index->hnsw_neighbors);
+    free(index->hnsw_counts);
+    free(index->hnsw_levels);
+    free(index->ann_neighbors);
+    free(index->signatures);
+    free(index->vectors);
+    free(index);
+}
+ng_status ng_vector_index_search_cosine(const ng_vector_index* index,
+                                        const double* query,
+                                        size_t k,
+                                        ng_vector_score* out,
+                                        size_t capacity,
+                                        size_t* out_count) {
+    if (!index)
+        return NG_INVALID_ARGUMENT;
+    return ng_vector_search_cosine(index->vectors, index->vector_count,
+                                   index->dimensions, query, k, out,
+                                   capacity, out_count);
+}
+ng_status ng_vector_index_search_approx_cosine(const ng_vector_index* index,
+                                               const double* query,
+                                               size_t k,
+                                               size_t candidate_count,
+                                               ng_vector_score* out,
+                                               size_t capacity,
+                                               size_t* out_count) {
+    uint64_t query_signature;
+    ng_vector_score* candidates = NULL;
+    size_t i, d, kept = 0;
+    if (!index || !query || !k || capacity < k || !out)
+        return NG_INVALID_ARGUMENT;
+    if (!candidate_count || candidate_count > index->vector_count)
+        candidate_count = index->vector_count;
+    candidates = (ng_vector_score*)malloc(candidate_count * sizeof(*candidates));
+    if (candidate_count && !candidates)
+        return NG_OOM;
+    query_signature = ng_vector_signature(query, index->dimensions);
+    for (i = 0; i < index->vector_count; i++) {
+        double distance = (double)ng_vector_hamming(query_signature ^ index->signatures[i]);
+        if (kept < candidate_count)
+            candidates[kept++] = (ng_vector_score){i, distance};
+        else {
+            size_t worst = 0;
+            for (d = 1; d < kept; d++)
+                if (candidates[d].score > candidates[worst].score)
+                    worst = d;
+            if (distance < candidates[worst].score)
+                candidates[worst] = (ng_vector_score){i, distance};
+        }
+    }
+    kept = 0;
+    for (i = 0; i < candidate_count; i++) {
+        size_t index_id = candidates[i].index;
+        double dot = 0.0, norm = 0.0, qnorm = 0.0, score;
+        for (d = 0; d < index->dimensions; d++) {
+            double value = index->vectors[index_id * index->dimensions + d];
+            dot += value * query[d];
+            norm += value * value;
+            qnorm += query[d] * query[d];
+        }
+        score = norm > 0.0 && qnorm > 0.0 ? dot / sqrt(norm * qnorm) : 0.0;
+        if (kept < k)
+            out[kept++] = (ng_vector_score){index_id, score};
+        else {
+            size_t worst = 0;
+            for (d = 1; d < kept; d++)
+                if (out[d].score < out[worst].score)
+                    worst = d;
+            if (score > out[worst].score)
+                out[worst] = (ng_vector_score){index_id, score};
+        }
+    }
+    for (i = 0; i < kept; i++)
+        for (d = i + 1; d < kept; d++)
+            if (out[d].score > out[i].score) {
+                ng_vector_score tmp = out[i];
+                out[i] = out[d];
+                out[d] = tmp;
+            }
+    if (out_count)
+        *out_count = kept;
+    free(candidates);
+    return NG_OK;
+}
+ng_status ng_vector_index_search_ann_cosine(const ng_vector_index* index,
+                                            const double* query,
+                                            size_t k,
+                                            size_t entry_count,
+                                            size_t search_budget,
+                                            ng_vector_score* out,
+                                            size_t capacity,
+                                            size_t* out_count) {
+    unsigned char* visited = NULL;
+    ng_vector_score* frontier = NULL;
+    size_t frontier_count = 0, visited_count = 0, result_count = 0, i, d;
+    if (!index || !query || !k || capacity < k || !out)
+        return NG_INVALID_ARGUMENT;
+    if (!entry_count || entry_count > index->vector_count)
+        entry_count = index->vector_count < 4 ? index->vector_count : 4;
+    if (!search_budget || search_budget > index->vector_count)
+        search_budget = index->vector_count;
+    visited = (unsigned char*)calloc(index->vector_count, sizeof(*visited));
+    frontier = (ng_vector_score*)malloc(index->vector_count * sizeof(*frontier));
+    if (index->vector_count && (!visited || !frontier)) {
+        free(visited);
+        free(frontier);
+        return NG_OOM;
+    }
+    for (i = 0; i < entry_count; i++) {
+        size_t entry = i * index->vector_count / entry_count;
+        if (!visited[entry]) {
+            visited[entry] = 1;
+            frontier[frontier_count++] =
+                (ng_vector_score){entry, ng_vector_cosine_score(index->vectors,
+                                                                index->dimensions,
+                                                                entry, query)};
+        }
+    }
+    while (frontier_count && visited_count < search_budget) {
+        size_t best = 0, node;
+        ng_vector_score current;
+        for (i = 1; i < frontier_count; i++)
+            if (frontier[i].score > frontier[best].score)
+                best = i;
+        current = frontier[best];
+        frontier[best] = frontier[--frontier_count];
+        visited_count++;
+        if (result_count < k)
+            out[result_count++] = current;
+        else {
+            size_t worst = 0;
+            for (d = 1; d < result_count; d++)
+                if (out[d].score < out[worst].score)
+                    worst = d;
+            if (current.score > out[worst].score)
+                out[worst] = current;
+        }
+        node = current.index;
+        for (i = 0; i < index->ann_degree && visited_count + frontier_count < search_budget; i++) {
+            size_t neighbor = index->ann_neighbors[node * index->ann_degree + i];
+            if (!visited[neighbor]) {
+                visited[neighbor] = 1;
+                frontier[frontier_count++] =
+                    (ng_vector_score){neighbor, ng_vector_cosine_score(index->vectors,
+                                                                       index->dimensions,
+                                                                       neighbor, query)};
+            }
+        }
+    }
+    for (i = 0; i < result_count; i++)
+        for (d = i + 1; d < result_count; d++)
+            if (out[d].score > out[i].score) {
+                ng_vector_score tmp = out[i];
+                out[i] = out[d];
+                out[d] = tmp;
+            }
+    if (out_count)
+        *out_count = result_count;
+    free(visited);
+    free(frontier);
+    return NG_OK;
+}
+ng_status ng_vector_index_search_hnsw_cosine(const ng_vector_index* index,
+                                             const double* query,
+                                             size_t k,
+                                             size_t ef_search,
+                                             ng_vector_score* out,
+                                             size_t capacity,
+                                             size_t* out_count) {
+    unsigned char* visited = NULL;
+    ng_vector_score* frontier = NULL;
+    ng_vector_score* candidates = NULL;
+    size_t frontier_count = 0, candidate_count = 0, expanded = 0;
+    size_t current, level, i, d;
+    double current_score;
+    if (!index || !query || !k || capacity < k || !out)
+        return NG_INVALID_ARGUMENT;
+    if (!index->vector_count) {
+        if (out_count)
+            *out_count = 0;
+        return NG_OK;
+    }
+    if (!index->hnsw_m || !index->hnsw_levels || !index->hnsw_counts ||
+        !index->hnsw_neighbors)
+        return ng_vector_index_search_cosine(index, query, k, out, capacity, out_count);
+    if (!ef_search)
+        ef_search = index->hnsw_ef_search;
+    if (ef_search < k)
+        ef_search = k;
+    if (ef_search > index->vector_count)
+        ef_search = index->vector_count;
+    current = index->hnsw_entry;
+    current_score = ng_vector_cosine_score(index->vectors, index->dimensions, current, query);
+    for (level = index->hnsw_max_level + 1; level-- > 1;) {
+        int improved = 1;
+        while (improved) {
+            size_t count = index->hnsw_counts[ng_vector_hnsw_count_slot(index, level, current)];
+            improved = 0;
+            for (i = 0; i < count; i++) {
+                size_t neighbor = index->hnsw_neighbors[ng_vector_hnsw_slot(index, level,
+                                                                            current, i)];
+                double score = ng_vector_cosine_score(index->vectors, index->dimensions,
+                                                      neighbor, query);
+                if (score > current_score ||
+                    (score == current_score && neighbor < current)) {
+                    current = neighbor;
+                    current_score = score;
+                    improved = 1;
+                }
+            }
+        }
+    }
+    visited = (unsigned char*)calloc(index->vector_count, sizeof(*visited));
+    frontier = (ng_vector_score*)malloc(index->vector_count * sizeof(*frontier));
+    candidates = (ng_vector_score*)malloc(ef_search * sizeof(*candidates));
+    if (!visited || !frontier || !candidates) {
+        free(candidates);
+        free(frontier);
+        free(visited);
+        return NG_OOM;
+    }
+    visited[current] = 1;
+    frontier[frontier_count++] = (ng_vector_score){current, current_score};
+    while (frontier_count && expanded < ef_search) {
+        size_t best = 0, node, count;
+        ng_vector_score selected;
+        for (i = 1; i < frontier_count; i++)
+            if (frontier[i].score > frontier[best].score ||
+                (frontier[i].score == frontier[best].score &&
+                 frontier[i].index < frontier[best].index))
+                best = i;
+        selected = frontier[best];
+        frontier[best] = frontier[--frontier_count];
+        if (candidate_count < ef_search)
+            candidates[candidate_count++] = selected;
+        expanded++;
+        node = selected.index;
+        count = index->hnsw_counts[ng_vector_hnsw_count_slot(index, 0, node)];
+        for (i = 0; i < count; i++) {
+            size_t neighbor = index->hnsw_neighbors[ng_vector_hnsw_slot(index, 0, node, i)];
+            if (!visited[neighbor]) {
+                visited[neighbor] = 1;
+                frontier[frontier_count++] =
+                    (ng_vector_score){neighbor, ng_vector_cosine_score(index->vectors,
+                                                                       index->dimensions,
+                                                                       neighbor, query)};
+            }
+        }
+    }
+    ng_vector_sort_scores_desc(candidates, candidate_count);
+    if (candidate_count > k)
+        candidate_count = k;
+    for (d = 0; d < candidate_count; d++)
+        out[d] = candidates[d];
+    if (out_count)
+        *out_count = candidate_count;
+    free(candidates);
+    free(frontier);
+    free(visited);
+    return NG_OK;
+}
+ng_status ng_vector_index_save(const ng_vector_index* index, const char* path) {
+    FILE* file;
+    uint64_t magic = UINT64_C(0x4e47564543494458);
+    size_t total, hnsw_layers, hnsw_counts_total, hnsw_neighbors_total;
+    if (!index || !path)
+        return NG_INVALID_ARGUMENT;
+    file = fopen(path, "wb");
+    if (!file)
+        return NG_IO_ERROR;
+    if (index->vector_count > SIZE_MAX / index->dimensions ||
+        index->vector_count * index->dimensions > SIZE_MAX / sizeof(double)) {
+        fclose(file);
+        return NG_LIMIT;
+    }
+    total = index->vector_count * index->dimensions;
+    if (index->hnsw_max_level == SIZE_MAX ||
+        index->hnsw_max_level + 1 > SIZE_MAX / index->vector_count) {
+        fclose(file);
+        return NG_LIMIT;
+    }
+    hnsw_layers = index->hnsw_max_level + 1;
+    hnsw_counts_total = hnsw_layers * index->vector_count;
+    if (index->hnsw_m && hnsw_counts_total > SIZE_MAX / index->hnsw_m) {
+        fclose(file);
+        return NG_LIMIT;
+    }
+    hnsw_neighbors_total = hnsw_counts_total * index->hnsw_m;
+    if (!ng_graphsage_write(file, &magic, sizeof(magic)) ||
+        !ng_graphsage_write(file, &index->vector_count, sizeof(index->vector_count)) ||
+        !ng_graphsage_write(file, &index->dimensions, sizeof(index->dimensions)) ||
+        !ng_graphsage_write(file, index->vectors, total * sizeof(*index->vectors)) ||
+        !ng_graphsage_write(file, index->signatures,
+                            index->vector_count * sizeof(*index->signatures)) ||
+        !ng_graphsage_write(file, &index->hnsw_m, sizeof(index->hnsw_m)) ||
+        !ng_graphsage_write(file, &index->hnsw_ef_construction,
+                            sizeof(index->hnsw_ef_construction)) ||
+        !ng_graphsage_write(file, &index->hnsw_ef_search, sizeof(index->hnsw_ef_search)) ||
+        !ng_graphsage_write(file, &index->hnsw_max_level, sizeof(index->hnsw_max_level)) ||
+        !ng_graphsage_write(file, &index->hnsw_entry, sizeof(index->hnsw_entry)) ||
+        !ng_graphsage_write(file, index->hnsw_levels,
+                            index->vector_count * sizeof(*index->hnsw_levels)) ||
+        !ng_graphsage_write(file, index->hnsw_counts,
+                            hnsw_counts_total * sizeof(*index->hnsw_counts)) ||
+        !ng_graphsage_write(file, index->hnsw_neighbors,
+                            hnsw_neighbors_total * sizeof(*index->hnsw_neighbors))) {
+        fclose(file);
+        return NG_IO_ERROR;
+    }
+    return fclose(file) == 0 ? NG_OK : NG_IO_ERROR;
+}
+ng_status ng_vector_index_load(const char* path, ng_vector_index** out) {
+    FILE* file;
+    uint64_t magic;
+    size_t vector_count, dimensions, total;
+    double* vectors;
+    uint64_t* signatures = NULL;
+    ng_vector_hnsw_config config = {0, 0, 0};
+    size_t hnsw_m = 0, hnsw_ef_construction = 0, hnsw_ef_search = 0;
+    size_t hnsw_max_level = 0, hnsw_entry = 0;
+    size_t* saved_levels = NULL;
+    size_t* saved_counts = NULL;
+    size_t* saved_neighbors = NULL;
+    int saved_hnsw_graph = 0;
+    ng_status status;
+    if (!path || !out)
+        return NG_INVALID_ARGUMENT;
+    file = fopen(path, "rb");
+    if (!file)
+        return NG_IO_ERROR;
+    if (fread(&magic, sizeof(magic), 1, file) != 1 ||
+        magic != UINT64_C(0x4e47564543494458) ||
+        fread(&vector_count, sizeof(vector_count), 1, file) != 1 ||
+        fread(&dimensions, sizeof(dimensions), 1, file) != 1 ||
+        !vector_count || !dimensions || vector_count > SIZE_MAX / dimensions ||
+        vector_count * dimensions > SIZE_MAX / sizeof(double)) {
+        fclose(file);
+        return NG_CORRUPT;
+    }
+    total = vector_count * dimensions;
+    vectors = (double*)malloc(total * sizeof(*vectors));
+    if (total && !vectors) {
+        fclose(file);
+        return NG_OOM;
+    }
+    if (fread(vectors, total * sizeof(*vectors), 1, file) != 1) {
+        free(vectors);
+        fclose(file);
+        return NG_CORRUPT;
+    }
+    signatures = (uint64_t*)malloc(vector_count * sizeof(*signatures));
+    if (!signatures) {
+        free(vectors);
+        fclose(file);
+        return NG_OOM;
+    }
+    if (fread(signatures, vector_count * sizeof(*signatures), 1, file) == 1 &&
+        fread(&hnsw_m, sizeof(hnsw_m), 1, file) == 1 &&
+        fread(&hnsw_ef_construction, sizeof(hnsw_ef_construction), 1, file) == 1 &&
+        fread(&hnsw_ef_search, sizeof(hnsw_ef_search), 1, file) == 1 &&
+        fread(&hnsw_max_level, sizeof(hnsw_max_level), 1, file) == 1 &&
+        fread(&hnsw_entry, sizeof(hnsw_entry), 1, file) == 1) {
+        config.m = hnsw_m;
+        config.ef_construction = hnsw_ef_construction;
+        config.ef_search = hnsw_ef_search;
+        if (hnsw_m && hnsw_entry < vector_count && hnsw_max_level != SIZE_MAX &&
+            hnsw_max_level + 1 <= SIZE_MAX / vector_count) {
+            size_t counts_total = (hnsw_max_level + 1) * vector_count;
+            size_t neighbors_total = counts_total <= SIZE_MAX / hnsw_m
+                                         ? counts_total * hnsw_m
+                                         : SIZE_MAX;
+            saved_levels = (size_t*)malloc(vector_count * sizeof(*saved_levels));
+            if (neighbors_total != SIZE_MAX) {
+                saved_counts = (size_t*)malloc(counts_total * sizeof(*saved_counts));
+                saved_neighbors = (size_t*)malloc(neighbors_total * sizeof(*saved_neighbors));
+            }
+            if (saved_levels && saved_counts && saved_neighbors &&
+                fread(saved_levels, vector_count * sizeof(*saved_levels), 1, file) == 1 &&
+                fread(saved_counts, counts_total * sizeof(*saved_counts), 1, file) == 1 &&
+                fread(saved_neighbors, neighbors_total * sizeof(*saved_neighbors), 1, file) == 1) {
+                saved_hnsw_graph = 1;
+            } else {
+                free(saved_neighbors);
+                free(saved_counts);
+                free(saved_levels);
+                saved_neighbors = NULL;
+                saved_counts = NULL;
+                saved_levels = NULL;
+            }
+        }
+    }
+    fclose(file);
+    status = ng_vector_index_create_hnsw(vectors, vector_count, dimensions,
+                                         config.m ? &config : NULL, out);
+    if (status == NG_OK && signatures) {
+        memcpy((*out)->signatures, signatures, vector_count * sizeof(*signatures));
+        if (saved_hnsw_graph) {
+            free((*out)->hnsw_levels);
+            free((*out)->hnsw_counts);
+            free((*out)->hnsw_neighbors);
+            (*out)->hnsw_levels = saved_levels;
+            (*out)->hnsw_counts = saved_counts;
+            (*out)->hnsw_neighbors = saved_neighbors;
+            (*out)->hnsw_m = hnsw_m;
+            (*out)->hnsw_ef_construction = hnsw_ef_construction;
+            (*out)->hnsw_ef_search = hnsw_ef_search;
+            (*out)->hnsw_max_level = hnsw_max_level;
+            (*out)->hnsw_entry = hnsw_entry;
+            saved_levels = NULL;
+            saved_counts = NULL;
+            saved_neighbors = NULL;
+        }
+    }
+    free(saved_neighbors);
+    free(saved_counts);
+    free(saved_levels);
+    free(signatures);
+    free(vectors);
+    return status;
+}
+ng_status ng_test_vector_index_approx_recall(double* out_full_recall,
+                                             double* out_partial_recall,
+                                             double* out_ann_recall,
+                                             double* out_hnsw_recall) {
+    const double vectors[18] = {1.0, 0.0, 0.0,
+                                0.9, 0.1, 0.0,
+                                0.0, 1.0, 0.0,
+                                0.0, 0.9, 0.1,
+                                0.0, 0.0, 1.0,
+                                0.1, 0.0, 0.9};
+    const double query[3] = {1.0, 0.0, 0.0};
+    ng_vector_index* index = NULL;
+    ng_vector_score exact[3], approx_full[3], approx_partial[3], ann[3], hnsw[3];
+    size_t exact_count = 0, full_count = 0, partial_count = 0, ann_count = 0;
+    size_t hnsw_count = 0, i, j, hit;
+    ng_status status;
+    if (!out_full_recall || !out_partial_recall || !out_ann_recall || !out_hnsw_recall)
+        return NG_INVALID_ARGUMENT;
+    status = ng_vector_index_create(vectors, 6, 3, &index);
+    if (status != NG_OK)
+        return status;
+    status = ng_vector_index_search_cosine(index, query, 3, exact, 3, &exact_count);
+    if (status != NG_OK)
+        goto finish;
+    status = ng_vector_index_search_approx_cosine(index, query, 3, 6,
+                                                  approx_full, 3, &full_count);
+    if (status != NG_OK)
+        goto finish;
+    status = ng_vector_index_search_approx_cosine(index, query, 3, 3,
+                                                  approx_partial, 3, &partial_count);
+    if (status != NG_OK)
+        goto finish;
+    status = ng_vector_index_search_ann_cosine(index, query, 3, 2, 6,
+                                               ann, 3, &ann_count);
+    if (status != NG_OK)
+        goto finish;
+    status = ng_vector_index_search_hnsw_cosine(index, query, 3, 6,
+                                                hnsw, 3, &hnsw_count);
+    if (status != NG_OK)
+        goto finish;
+    hit = 0;
+    for (i = 0; i < full_count; i++)
+        for (j = 0; j < exact_count; j++)
+            if (approx_full[i].index == exact[j].index)
+                hit++;
+    *out_full_recall = exact_count ? (double)hit / (double)exact_count : 0.0;
+    hit = 0;
+    for (i = 0; i < partial_count; i++)
+        for (j = 0; j < exact_count; j++)
+            if (approx_partial[i].index == exact[j].index)
+                hit++;
+    *out_partial_recall = exact_count ? (double)hit / (double)exact_count : 0.0;
+    hit = 0;
+    for (i = 0; i < ann_count; i++)
+        for (j = 0; j < exact_count; j++)
+            if (ann[i].index == exact[j].index)
+                hit++;
+    *out_ann_recall = exact_count ? (double)hit / (double)exact_count : 0.0;
+    hit = 0;
+    for (i = 0; i < hnsw_count; i++)
+        for (j = 0; j < exact_count; j++)
+            if (hnsw[i].index == exact[j].index)
+                hit++;
+    *out_hnsw_recall = exact_count ? (double)hit / (double)exact_count : 0.0;
+finish:
+    ng_vector_index_free(index);
+    return status;
 }
 static ng_status ng_distance_centrality(const ng_graph* g,
                                         ng_direction direction,

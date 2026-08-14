@@ -15,6 +15,11 @@ The normal `make test` target covers:
 * allocation-failure rollback during property-graph import;
 * deterministic repeated property-graph exports.
 
+The `make examples` target compiles the runnable examples in `examples/*.c`.
+During local verification the examples are also run manually to exercise direct
+graph creation, MiniCypher execution, analytics, GraphSAGE training, and
+vector-index search/persistence paths.
+
 The CLI regression suite currently runs `nautylus bench bench.ng 128`, which creates a 128-node chain, saves it, reopens it, validates it, builds an exact-match node index, and checks one indexed lookup.
 
 ## Benchmark Command
@@ -44,4 +49,3 @@ seconds: 0.010000
 ```
 
 Timing depends on hardware, compiler, filesystem, and current system load. Treat it as a local smoke baseline for regressions, not as a published throughput claim.
-

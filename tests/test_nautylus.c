@@ -20,6 +20,16 @@ extern ng_status ng_test_graphsage_finite_difference_gradient_check(const ng_gra
                                                                     int,
                                                                     ng_graphsage_loss_kind,
                                                                     double*);
+extern ng_status ng_test_graphsage_evaluation_equivalence(const ng_graph*,
+                                                          ng_direction,
+                                                          ng_symbol_id,
+                                                          ng_graphsage_loss_kind,
+                                                          double*);
+extern ng_status ng_test_graphsage_cached_training_equivalence(const ng_graph*,
+                                                               ng_direction,
+                                                               ng_symbol_id,
+                                                               double*);
+extern ng_status ng_test_vector_index_approx_recall(double*, double*, double*, double*);
 enum ng_test_import_stage {
     NG_TEST_IMPORT_NONE = 0,
     NG_TEST_IMPORT_SNAPSHOT,
@@ -769,6 +779,69 @@ int main(void) {
             assert(ng_vector_search_cosine(embedding, 5, 3, embedding, 2, nearest, 2,
                                            &nearest_count) == NG_OK &&
                    nearest_count == 2 && nearest[0].index == 0 && nearest[0].score > 0.99);
+            {
+                ng_vector_index* vector_index = NULL;
+                ng_vector_index* loaded_index = NULL;
+                ng_vector_index* tuned_index = NULL;
+                ng_vector_score index_hits[2], approx_hits[2], loaded_hits[2];
+                ng_vector_hnsw_config hnsw_config = {4, 6, 6};
+                size_t index_count = 0, loaded_count = 0;
+                assert(ng_vector_index_create(embedding, 5, 3, &vector_index) == NG_OK);
+                assert(ng_vector_index_create_hnsw(embedding, 5, 3, &hnsw_config,
+                                                   &tuned_index) == NG_OK);
+                assert(ng_vector_index_search_cosine(vector_index, embedding, 2,
+                                                     index_hits, 2, &index_count) == NG_OK &&
+                       index_count == 2 && index_hits[0].index == 0 &&
+                       index_hits[0].score > 0.99);
+                assert(ng_vector_index_search_approx_cosine(vector_index, embedding, 2, 4,
+                                                            approx_hits, 2,
+                                                            &index_count) == NG_OK &&
+                       index_count == 2 && approx_hits[0].index == 0 &&
+                       approx_hits[0].score > 0.99);
+                assert(ng_vector_index_save(vector_index, "vectors.ngv") == NG_OK);
+                assert(ng_vector_index_load("vectors.ngv", &loaded_index) == NG_OK);
+                assert(ng_vector_index_search_cosine(loaded_index, embedding, 2,
+                                                     loaded_hits, 2, &loaded_count) == NG_OK &&
+                       loaded_count == index_count);
+                for (i = 0; i < loaded_count; i++) {
+                    assert(loaded_hits[i].index == index_hits[i].index);
+                    assert(absd(loaded_hits[i].score - index_hits[i].score) < 0.0000001);
+                }
+                assert(ng_vector_index_search_approx_cosine(loaded_index, embedding, 1, 2,
+                                                            loaded_hits, 1,
+                                                            &loaded_count) == NG_OK &&
+                       loaded_count == 1 && loaded_hits[0].index == 0);
+                assert(ng_vector_index_search_ann_cosine(loaded_index, embedding, 1, 2, 5,
+                                                         loaded_hits, 1,
+                                                         &loaded_count) == NG_OK &&
+                       loaded_count == 1 && loaded_hits[0].index == 0);
+                assert(ng_vector_index_search_hnsw_cosine(loaded_index, embedding, 1, 6,
+                                                          loaded_hits, 1,
+                                                          &loaded_count) == NG_OK &&
+                       loaded_count == 1 && loaded_hits[0].index == 0);
+                assert(ng_vector_index_search_hnsw_cosine(tuned_index, embedding, 1, 3,
+                                                          loaded_hits, 1,
+                                                          &loaded_count) == NG_OK &&
+                       loaded_count == 1 && loaded_hits[0].index == 0);
+                {
+                    double full_recall = 0.0, partial_recall = 0.0, ann_recall = 0.0;
+                    double hnsw_recall = 0.0;
+                    assert(ng_test_vector_index_approx_recall(&full_recall,
+                                                              &partial_recall,
+                                                              &ann_recall,
+                                                              &hnsw_recall) == NG_OK);
+                    assert(full_recall == 1.0);
+                    assert(partial_recall >= 0.0 && partial_recall <= 1.0);
+                    assert(ann_recall >= 0.0 && ann_recall <= 1.0);
+                    assert(hnsw_recall >= 0.0 && hnsw_recall <= 1.0);
+                }
+                assert(ng_vector_index_create(NULL, 5, 3, &loaded_index) ==
+                       NG_INVALID_ARGUMENT);
+                ng_vector_index_free(loaded_index);
+                ng_vector_index_free(tuned_index);
+                ng_vector_index_free(vector_index);
+                remove("vectors.ngv");
+            }
             ng_graphsage_model_free(loaded);
             ng_graphsage_model_free(model);
             remove("graphsage.model");
@@ -804,6 +877,33 @@ int main(void) {
                            g, NG_DIRECTION_EITHER, rel, 3, 0, 1,
                            NG_GRAPHSAGE_LOSS_MSE, &max_gradient_delta) == NG_OK);
                 assert(max_gradient_delta < 0.00001);
+                max_gradient_delta = 1.0;
+                assert(ng_test_graphsage_finite_difference_gradient_check(
+                           g, NG_DIRECTION_EITHER, rel, 3, 1, 1,
+                           NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY,
+                           &max_gradient_delta) == NG_OK);
+                assert(max_gradient_delta < 0.00001);
+                max_gradient_delta = 1.0;
+                assert(ng_test_graphsage_evaluation_equivalence(
+                           g, NG_DIRECTION_EITHER, rel, NG_GRAPHSAGE_LOSS_MSE,
+                           &max_gradient_delta) == NG_OK);
+                assert(max_gradient_delta < 0.0000001);
+                max_gradient_delta = 1.0;
+                assert(ng_test_graphsage_evaluation_equivalence(
+                           g, NG_DIRECTION_EITHER, rel,
+                           NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY,
+                           &max_gradient_delta) == NG_OK);
+                assert(max_gradient_delta < 0.0000001);
+                max_gradient_delta = 1.0;
+                assert(ng_test_graphsage_evaluation_equivalence(
+                           g, NG_DIRECTION_EITHER, rel,
+                           NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY,
+                           &max_gradient_delta) == NG_OK);
+                assert(max_gradient_delta < 0.0000001);
+                max_gradient_delta = 1.0;
+                assert(ng_test_graphsage_cached_training_equivalence(
+                           g, NG_DIRECTION_EITHER, rel, &max_gradient_delta) == NG_OK);
+                assert(max_gradient_delta < 0.0000001);
             }
             assert(ng_graphsage_model_create(&config, &model) == NG_OK);
             {
@@ -825,11 +925,15 @@ int main(void) {
                 assert(ng_graphsage_model_train_ex(model, g, NG_DIRECTION_EITHER, rel,
                                                    features, targets, &options, &report) == NG_OK &&
                        report.training_samples == 4 && report.validation_samples == 1 &&
-                       report.training_loss >= 0.0 && report.validation_loss >= 0.0);
+                       report.training_loss >= 0.0 && report.validation_loss >= 0.0 &&
+                       report.training_accuracy == 0.0 && report.validation_accuracy == 0.0);
                 options.loss = NG_GRAPHSAGE_LOSS_BINARY_CROSS_ENTROPY;
                 assert(ng_graphsage_model_train_ex(model, g, NG_DIRECTION_EITHER, rel,
                                                    features, targets, &options, &report) == NG_OK &&
-                       report.training_loss >= 0.0);
+                       report.training_loss >= 0.0 &&
+                       report.training_accuracy >= 0.0 && report.training_accuracy <= 1.0 &&
+                       report.training_precision >= 0.0 && report.training_precision <= 1.0 &&
+                       report.training_recall >= 0.0 && report.training_recall <= 1.0);
                 {
                     double train_history[4] = {-1.0, -1.0, -1.0, -1.0};
                     double validation_history[4] = {-1.0, -1.0, -1.0, -1.0};
@@ -851,6 +955,14 @@ int main(void) {
                     assert(diagnostics.validation_start == 4 &&
                            diagnostics.validation_row_count == 1 &&
                            diagnostics.validation_seed == options.seed);
+                    assert(diagnostics.batch_count == 6 &&
+                           diagnostics.cached_forward_reuses == diagnostics.batch_count &&
+                           diagnostics.sampled_neighbor_count > 0 &&
+                           diagnostics.gradient_buffer_bytes > 0 &&
+                           diagnostics.subgraph_node_references > 0 &&
+                           diagnostics.subgraph_edge_references > 0);
+                    assert(diagnostics.subgraph_node_references <
+                           diagnostics.batch_count * 5 * 2 * config.layers);
                     assert(validation_rows[0] == 4 && validation_rows[1] == 99);
                     assert(train_history[0] >= 0.0 && train_history[1] >= 0.0 &&
                            train_history[2] >= 0.0 && train_history[3] == -1.0);
@@ -866,6 +978,58 @@ int main(void) {
                     assert(diagnostics.converged && diagnostics.epochs_run == 2 &&
                            diagnostics.epoch_count == 2 &&
                            diagnostics.convergence_delta >= 0.0);
+                }
+                {
+                    const double class_targets[15] = {1.0, 0.0, 0.0,
+                                                      0.0, 1.0, 0.0,
+                                                      0.0, 0.0, 1.0,
+                                                      1.0, 0.0, 0.0,
+                                                      0.0, 1.0, 0.0};
+                    const double bad_class_targets[15] = {1.0, 0.0, 0.0,
+                                                          0.0, 1.0, 0.0,
+                                                          0.0, 0.0, 1.0,
+                                                          1.0, 0.0, 0.0,
+                                                          0.0, 0.5, 0.0};
+                    options.epochs = 1;
+                    options.loss = NG_GRAPHSAGE_LOSS_SOFTMAX_CROSS_ENTROPY;
+                    assert(ng_graphsage_model_train_ex(model, g, NG_DIRECTION_EITHER, rel,
+                                                       features, class_targets, &options,
+                                                       &report) == NG_OK &&
+                           report.training_loss >= 0.0 &&
+                           report.training_accuracy >= 0.0 && report.training_accuracy <= 1.0 &&
+                           report.training_precision >= 0.0 && report.training_precision <= 1.0 &&
+                           report.training_recall >= 0.0 && report.training_recall <= 1.0);
+                    assert(ng_graphsage_model_train_ex(model, g, NG_DIRECTION_EITHER, rel,
+                                                       features, bad_class_targets, &options,
+                                                       &report) == NG_INVALID_ARGUMENT);
+                    {
+                        double probabilities[15], confidence[5];
+                        size_t classes[5];
+                        size_t prediction_count = 0;
+                        assert(ng_graphsage_model_predict_probabilities(
+                                   model, g, NG_DIRECTION_EITHER, rel, features,
+                                   probabilities, 15, &prediction_count) == NG_OK &&
+                               prediction_count == 5);
+                        for (i = 0; i < prediction_count; i++) {
+                            double row_sum = probabilities[i * 3] +
+                                             probabilities[i * 3 + 1] +
+                                             probabilities[i * 3 + 2];
+                            assert(absd(row_sum - 1.0) < 0.000001);
+                        }
+                        assert(ng_graphsage_model_predict_classes(
+                                   model, g, NG_DIRECTION_EITHER, rel, features,
+                                   classes, confidence, 5, &prediction_count) == NG_OK &&
+                               prediction_count == 5);
+                        for (i = 0; i < prediction_count; i++) {
+                            double best = probabilities[i * 3 + classes[i]];
+                            assert(classes[i] < 3);
+                            assert(absd(best - confidence[i]) < 0.000001);
+                        }
+                        assert(ng_graphsage_model_predict_classes(
+                                   model, g, NG_DIRECTION_EITHER, rel, features,
+                                   classes, confidence, 4, &prediction_count) == NG_LIMIT &&
+                               prediction_count == 5);
+                    }
                 }
             }
             ng_graphsage_model_free(model);

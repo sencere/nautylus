@@ -11,18 +11,18 @@ EXAMPLE_DIR=examples
 LIB_OBJ=$(BUILD_DIR)/nautylus.o
 CLI_OBJ=$(BUILD_DIR)/nautylus.c99main.o
 TEST_OBJ=$(BUILD_DIR)/test_nautylus.o
-EXAMPLE_OBJ=$(BUILD_DIR)/basic.o
+EXAMPLE_SRCS=$(wildcard $(EXAMPLE_DIR)/*.c)
+EXAMPLE_BINS=$(patsubst $(EXAMPLE_DIR)/%.c,$(BUILD_DIR)/%,$(EXAMPLE_SRCS))
 
 CLI=$(BUILD_DIR)/nautylus
 TEST_BIN=$(BUILD_DIR)/test_nautylus
-EXAMPLE_BIN=$(BUILD_DIR)/basic
 
 all: $(CLI)
 
 test: $(TEST_BIN) $(CLI)
 	./$(TEST_BIN)
 
-examples: $(EXAMPLE_BIN)
+examples: $(EXAMPLE_BINS)
 
 perf: $(CLI)
 	./$(CLI) bench $(BUILD_DIR)/perf.ng 1000
@@ -36,7 +36,7 @@ $(CLI): $(LIB_OBJ) $(CLI_OBJ)
 $(TEST_BIN): $(LIB_OBJ) $(TEST_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
-$(EXAMPLE_BIN): $(LIB_OBJ) $(EXAMPLE_OBJ)
+$(BUILD_DIR)/%: $(BUILD_DIR)/%.o $(LIB_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
 
 $(LIB_OBJ): $(SRC_DIR)/nautylus.c $(SRC_DIR)/nautylus.h | $(BUILD_DIR)
@@ -48,8 +48,8 @@ $(CLI_OBJ): $(SRC_DIR)/nautylus.c99main.c $(SRC_DIR)/nautylus.h | $(BUILD_DIR)
 $(TEST_OBJ): $(TEST_DIR)/test_nautylus.c $(SRC_DIR)/nautylus.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -DNAUTYLUS_CLI=\"./$(CLI)\" $(CFLAGS) -c $(TEST_DIR)/test_nautylus.c -o $@
 
-$(EXAMPLE_OBJ): $(EXAMPLE_DIR)/basic.c $(SRC_DIR)/nautylus.h | $(BUILD_DIR)
-	$(CC) $(CPPFLAGS) $(CFLAGS) -c $(EXAMPLE_DIR)/basic.c -o $@
+$(BUILD_DIR)/%.o: $(EXAMPLE_DIR)/%.c $(SRC_DIR)/nautylus.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 clean:
 	rm -rf $(BUILD_DIR) build-asan

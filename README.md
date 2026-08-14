@@ -52,6 +52,13 @@ Build examples:
 make examples
 ```
 
+The example folder now contains runnable coverage for the main surfaces:
+`basic.c` for direct graph mutation, `cypher.c` for parameterized MiniCypher,
+`analytics.c` for graph algorithms, `graphsage_vector.c` for GraphSAGE and
+vector search, `cypher_gallery.cypher` for pasteable web/CLI queries, and
+`cli_workflow.sh` for an end-to-end command-line workflow. See
+[examples/README.md](examples/README.md).
+
 Run the local performance smoke baseline:
 
 ```sh
@@ -274,9 +281,9 @@ Implemented algorithms:
 
 All analytics APIs operate on the current in-memory graph and write results into caller-owned arrays. Pass `type = 0` to include all relationship types, or a relationship symbol ID to filter by type. If the output capacity is too small, the call returns `NG_LIMIT` and reports the required count when an `out_count` pointer is supplied.
 
-Weighted Dijkstra, unweighted BFS shortest paths, callback-based simple-path enumeration, heuristic-driven A*, deterministic label propagation, a Louvain-style local-moving pass, eigenvector, closeness, and harmonic centrality, FastRP-style seeded embeddings, lightweight Node2Vec- and GraphSAGE-style embeddings, configurable GraphSAGE model inference/training with analytic MSE and binary cross-entropy backpropagation, minimum spanning trees, maximum flow, Jaccard KNN similarity, label-filtered KNN, Adamic-Adar, and Resource Allocation link prediction are available through the C API. Full multilevel Louvain/Leiden aggregation, multiclass training, richer filtered similarity, and large-scale optimized centrality are not implemented yet.
+Weighted Dijkstra, unweighted BFS shortest paths, callback-based simple-path enumeration, heuristic-driven A*, deterministic label propagation, a Louvain-style local-moving pass, eigenvector, closeness, and harmonic centrality, FastRP-style seeded embeddings, lightweight Node2Vec- and GraphSAGE-style embeddings, configurable GraphSAGE model inference/training with analytic MSE, binary cross-entropy, and softmax cross-entropy backpropagation, minimum spanning trees, maximum flow, Jaccard KNN similarity, label-filtered KNN, Adamic-Adar, Resource Allocation link prediction, and exact/approximate/HNSW vector search are available through the C API. Full multilevel Louvain/Leiden aggregation, richer filtered similarity, and large-scale optimized centrality are not implemented yet.
 
-For GraphSAGE-style embeddings, provide one row of numeric features per node and receive a row-major embedding matrix. Reusable models support sampled multi-layer inference, analytic training, epoch diagnostics, convergence status, validation split details, normalization, save/load, and in-memory cosine search. See [docs/graphsage.md](docs/graphsage.md) for the complete call contract and working examples.
+For GraphSAGE-style embeddings, provide one row of numeric features per node and receive a row-major embedding matrix. Reusable models support sampled multi-layer inference, analytic training with compact sampled subgraphs and reusable gradient buffers, optimized split reporting, epoch diagnostics, convergence status, validation split details, classification metrics, prediction helpers, normalization, save/load, exact/approximate/flat-ANN/HNSW vector-index persistence, and cosine search. See [docs/graphsage.md](docs/graphsage.md) for the complete call contract and working examples.
 
 ## MiniCypher Subset
 
