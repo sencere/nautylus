@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" type="image/png" href="/logo.png">
   <title>nautylus</title>
   <style>
     :root {
@@ -132,6 +133,7 @@
     }
 
     .query-bar {
+      position: relative;
       display: grid;
       grid-template-columns: auto minmax(0, 1fr) auto auto;
       align-items: start;
@@ -178,6 +180,18 @@
       resize: none;
       overflow-y: auto;
       line-height: 20px;
+      caret-color: transparent;
+    }
+
+    .query-cursor {
+      position: absolute;
+      z-index: 2;
+      width: 7px;
+      height: 18px;
+      background: transparent;
+      border: 1px solid var(--text);
+      pointer-events: none;
+      display: none;
     }
 
     .status {
@@ -468,7 +482,8 @@
       <div class="brand"><img src="/logo.png" alt="nautylus"></div>
       <div class="query-bar" role="search">
         <span class="query-prompt">$</span>
-        <textarea id="query" rows="1" spellcheck="false">MATCH (n) RETURN n LIMIT 20</textarea>
+        <textarea id="query" rows="1" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off">MATCH (n) RETURN n LIMIT 20</textarea>
+        <span id="queryCursor" class="query-cursor" aria-hidden="true"></span>
         <button id="runButton" class="primary" type="button" onclick="runQuery()">Run</button>
         <button id="explainButton" type="button" onclick="explain()">Explain</button>
       </div>
@@ -942,7 +957,7 @@
 
     function color(label) {
       if (nodeColors.has(label)) return nodeColors.get(label);
-      const palette = ['#68bdf6', '#6dce9e', '#fcea7e', '#f2baf6', '#ffc766', '#93c5fd', '#a5abb6'];
+      const palette = ['#2f6fa8', '#347b5b', '#b08a12', '#95529a', '#b56d16', '#4c73a8', '#687481'];
       let h = 0;
       for (const ch of label) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
       return palette[h % palette.length];
@@ -1224,17 +1239,79 @@
     }
 
     const queryInput = document.getElementById('query');
+    const queryCursor = document.getElementById('queryCursor');
+    const queryBar = document.querySelector('.query-bar');
+    const queryCursorMirror = document.createElement('div');
+    const queryCursorMarker = document.createElement('span');
+    const queryCursorText = document.createTextNode('');
+    let queryCursorFrame = 0;
+
+    queryCursorMirror.style.position = 'fixed';
+    queryCursorMirror.style.left = '-10000px';
+    queryCursorMirror.style.top = '0';
+    queryCursorMirror.style.visibility = 'hidden';
+    queryCursorMirror.style.boxSizing = 'border-box';
+    queryCursorMirror.style.whiteSpace = 'pre-wrap';
+    queryCursorMirror.style.overflowWrap = 'break-word';
+    queryCursorMarker.style.display = 'inline-block';
+    queryCursorMarker.style.width = '7px';
+    queryCursorMarker.style.height = '18px';
+    queryCursorMarker.textContent = '\u200b';
+    queryCursorMirror.appendChild(queryCursorText);
+    queryCursorMirror.appendChild(queryCursorMarker);
+    document.body.appendChild(queryCursorMirror);
+
+    function updateQueryCursor() {
+      if (queryCursorFrame)
+        cancelAnimationFrame(queryCursorFrame);
+      queryCursorFrame = requestAnimationFrame(renderQueryCursor);
+    }
+
+    function renderQueryCursor() {
+      queryCursorFrame = 0;
+      if (document.activeElement !== queryInput) {
+        queryCursor.style.display = 'none';
+        return;
+      }
+      const style = getComputedStyle(queryInput);
+      const queryRect = queryInput.getBoundingClientRect();
+      const barRect = queryBar.getBoundingClientRect();
+      queryCursorMirror.style.width = `${queryInput.clientWidth}px`;
+      queryCursorMirror.style.font = style.font;
+      queryCursorMirror.style.lineHeight = style.lineHeight;
+      queryCursorMirror.style.letterSpacing = style.letterSpacing;
+      queryCursorMirror.style.padding = style.padding;
+      queryCursorText.nodeValue = queryInput.value.slice(0, queryInput.selectionStart || 0);
+      const markerRect = queryCursorMarker.getBoundingClientRect();
+      const mirrorRect = queryCursorMirror.getBoundingClientRect();
+      queryCursor.style.left = `${queryRect.left - barRect.left + markerRect.left - mirrorRect.left - queryInput.scrollLeft}px`;
+      queryCursor.style.top = `${queryRect.top - barRect.top + markerRect.top - mirrorRect.top - queryInput.scrollTop}px`;
+      queryCursor.style.height = `${Math.max(14, parseFloat(style.lineHeight) - 2)}px`;
+      queryCursor.style.display = 'block';
+    }
 
     function resizeQueryInput() {
       queryInput.style.height = '34px';
       queryInput.style.height = `${Math.min(queryInput.scrollHeight, 140)}px`;
     }
 
-    queryInput.addEventListener('input', resizeQueryInput);
+    queryInput.addEventListener('input', () => {
+      resizeQueryInput();
+      updateQueryCursor();
+    });
+    queryInput.addEventListener('focus', updateQueryCursor);
+    queryInput.addEventListener('blur', updateQueryCursor);
+    queryInput.addEventListener('click', updateQueryCursor);
+    queryInput.addEventListener('keyup', updateQueryCursor);
+    queryInput.addEventListener('select', updateQueryCursor);
+    queryInput.addEventListener('scroll', updateQueryCursor);
     queryInput.addEventListener('keydown', event => {
+      updateQueryCursor();
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') runQuery();
     });
     resizeQueryInput();
+    updateQueryCursor();
+    window.addEventListener('resize', updateQueryCursor);
 
     const resizeObserver = new ResizeObserver(() => {
       const width = graphHost.clientWidth;
