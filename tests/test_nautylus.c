@@ -3089,6 +3089,16 @@ int main(void) {
         assert(fclose(ef) == 0);
         assert(same_file("fullcreate-forward-search.out", "fullcreate-forward-search.expected"));
         assert(system(NAUTYLUS_CLI
+                      " query fullcreate.ng 'MATCH (a:Person)-[:KNOWS]->(b:Person) WHERE "
+                      "a.name = \"Joe\" RETURN a.name, b.name' --format json > "
+                      "fullcreate-json.out") == 0);
+        ef = fopen("fullcreate-json.expected", "wb");
+        assert(ef);
+        fputs("{\"columns\":[\"a.name\",\"b.name\"],\"rows\":[[\"Joe\",\"Bob\"]],\"row_count\":1}\n",
+              ef);
+        assert(fclose(ef) == 0);
+        assert(same_file("fullcreate-json.out", "fullcreate-json.expected"));
+        assert(system(NAUTYLUS_CLI
                       " query fullcreate.ng 'CREATE (a:Person {name: "
                       "\"A\"})<-[r:KNOWS {since: 2027}]-(b:Person {name: \"B\"}) "
                       "RETURN a.name, r.since, b.name' > fullcreate-reverse.out") == 0);
@@ -3179,6 +3189,8 @@ int main(void) {
         remove("fullcreate-forward.expected");
         remove("fullcreate-forward-search.out");
         remove("fullcreate-forward-search.expected");
+        remove("fullcreate-json.out");
+        remove("fullcreate-json.expected");
         remove("fullcreate-reverse.out");
         remove("fullcreate-reverse.expected");
         remove("fullcreate-reverse-search.out");

@@ -138,7 +138,7 @@ nautylus indexes DB
 nautylus bench FILE NODE_COUNT
 nautylus serve DB PORT
 nautylus search DB QUERY
-nautylus query DB QUERY [--format auto|verbose|plain]
+nautylus query DB QUERY [--format auto|verbose|plain|json]
 nautylus explain QUERY
 ```
 
@@ -165,7 +165,8 @@ Notes:
 * `nautylus bench` creates a deterministic benchmark graph, saves/reopens it, validates it, builds an exact-match node index, and prints local timing.
 * `nautylus serve` starts a local browser workbench for querying, importing triples, creating sample data, and managing simple schema metadata.
 * `nautylus search` runs the current MiniCypher subset.
-* `nautylus query` runs the current MiniCypher subset. `--format auto` uses a table for terminal output and plain tab-separated values when redirected; `--format verbose` always uses the table, while `--format plain` always emits scripting-friendly values only.
+* `nautylus query` runs the current MiniCypher subset. `--format auto` uses a table for terminal output and plain tab-separated values when redirected; `--format verbose` always uses the table; `--format plain` always emits scripting-friendly values only; and `--format json` emits a machine-readable result envelope.
+  JSON responses have the shape `{"columns":[...],"rows":[[...]],"row_count":N}`. Result cells are currently JSON strings preserving the CLI rendering, which is suitable for code/template text and Vim integrations.
 * `nautylus analyze` and `nautylus analyse` validate the database and print graph counts.
 * `nautylus explain` prints the simple selected query plan.
 * Exit status is `0` on success and non-zero on failure.
@@ -364,6 +365,7 @@ Example:
 ./build/nautylus query graph.ng 'MATCH (n) RETURN n LIMIT 10'
 ./build/nautylus query graph.ng 'MATCH (n) RETURN n.name' --format verbose
 ./build/nautylus query graph.ng 'MATCH (n) RETURN n.name' --format plain
+./build/nautylus query graph.ng 'MATCH (n) RETURN n.name' --format json
 ./build/nautylus explain 'MATCH (n:Person) WHERE n.name = "Alice" RETURN n'
 ./build/nautylus query graph.ng 'MATCH (n)-[:KNOWS]->(m) RETURN m'
 ./build/nautylus query graph.ng 'MATCH (n)-[:KNOWS*1..3]->(m) RETURN m'

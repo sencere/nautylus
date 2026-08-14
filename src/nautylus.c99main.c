@@ -44,7 +44,7 @@ static void usage(FILE* out) {
             "  nautylus bench FILE NODE_COUNT\n"
             "  nautylus serve DB PORT\n"
             "  nautylus search DB QUERY\n"
-            "  nautylus query DB QUERY [--format auto|verbose|plain]\n"
+            "  nautylus query DB QUERY [--format auto|verbose|plain|json]\n"
             "  nautylus explain QUERY\n");
 }
 
@@ -948,7 +948,8 @@ static ng_status run_server(const char* path, size_t port) {
 typedef enum {
     QUERY_FORMAT_AUTO,
     QUERY_FORMAT_VERBOSE,
-    QUERY_FORMAT_PLAIN
+    QUERY_FORMAT_PLAIN,
+    QUERY_FORMAT_JSON
 } query_format;
 
 static int query_stdout_is_terminal(void) {
@@ -966,6 +967,8 @@ static int query_format_parse(const char* text, query_format* out) {
         *out = QUERY_FORMAT_VERBOSE;
     else if (!strcmp(text, "plain"))
         *out = QUERY_FORMAT_PLAIN;
+    else if (!strcmp(text, "json"))
+        *out = QUERY_FORMAT_JSON;
     else
         return 0;
     return 1;
@@ -1186,6 +1189,136 @@ static ng_status query_copy_plain(FILE* input) {
     return ferror(input) || ferror(stdout) ? NG_IO_ERROR : NG_OK;
 }
 
+static int query_json_string(const char* text) {
+    const unsigned char* p = (const unsigned char*)text;
+    if (fputc('"', stdout) == EOF)
+        return 0;
+    while (*p) {
+        switch (*p) {
+        case '"':
+            if (fputs("\\\"", stdout) == EOF)
+                return 0;
+            break;
+        case '\\':
+            if (fputs("\\\\", stdout) == EOF)
+                return 0;
+            break;
+        case '\b':
+            if (fputs("\\b", stdout) == EOF)
+                return 0;
+            break;
+        case '\f':
+            if (fputs("\\f", stdout) == EOF)
+                return 0;
+            break;
+        case '\n':
+            if (fputs("\\n", stdout) == EOF)
+                return 0;
+            break;
+        case '\r':
+            if (fputs("\\r", stdout) == EOF)
+                return 0;
+            break;
+        case '\t':
+            if (fputs("\\t", stdout) == EOF)
+                return 0;
+            break;
+        default:
+            if (*p < 0x20 && fprintf(stdout, "\\u%04x", (unsigned)*p) < 0)
+                return 0;
+            else if (*p >= 0x20 && fputc(*p, stdout) == EOF)
+                return 0;
+            break;
+        }
+        p++;
+    }
+    return fputc('"', stdout) != EOF;
+}
+
+static ng_status query_print_json(FILE* input, const char* query) {
+    query_output_row* rows = NULL;
+    char headers[16][128] = {{0}};
+    char line[65536];
+    size_t row_count = 0, row_capacity = 0, column_count, i, j;
+    column_count = query_headers(query, headers, 16);
+    if (fseek(input, 0, SEEK_SET) != 0)
+        return NG_IO_ERROR;
+    while (fgets(line, sizeof(line), input)) {
+        size_t length = strlen(line);
+        query_output_row* row;
+        char* cursor;
+        while (length && (line[length - 1] == '\n' || line[length - 1] == '\r'))
+            line[--length] = 0;
+        if (row_count == row_capacity) {
+            size_t next_capacity = row_capacity ? row_capacity * 2 : 16;
+            query_output_row* grown =
+                (query_output_row*)realloc(rows, next_capacity * sizeof(*rows));
+            if (!grown) {
+                query_output_rows_free(rows, row_count);
+                return NG_OOM;
+            }
+            rows = grown;
+            row_capacity = next_capacity;
+        }
+        row = &rows[row_count++];
+        row->text = (char*)malloc(length + 1);
+        if (!row->text) {
+            query_output_rows_free(rows, row_count - 1);
+            return NG_OOM;
+        }
+        memcpy(row->text, line, length + 1);
+        cursor = row->text;
+        row->count = 0;
+        while (row->count < 16) {
+            row->cells[row->count++] = cursor;
+            cursor = strchr(cursor, '\t');
+            if (!cursor)
+                break;
+            *cursor++ = 0;
+        }
+        if (row->count > column_count)
+            column_count = row->count;
+    }
+    if (ferror(input)) {
+        query_output_rows_free(rows, row_count);
+        return NG_IO_ERROR;
+    }
+    for (i = 0; i < column_count; i++)
+        if (!headers[i][0])
+            snprintf(headers[i], sizeof(headers[i]), "column%lu", (unsigned long)(i + 1));
+    if (fputs("{\"columns\":[", stdout) == EOF)
+        goto io_error;
+    for (i = 0; i < column_count; i++) {
+        if (i && fputc(',', stdout) == EOF)
+            goto io_error;
+        if (!query_json_string(headers[i]))
+            goto io_error;
+    }
+    if (fputs("],\"rows\":[", stdout) == EOF)
+        goto io_error;
+    for (i = 0; i < row_count; i++) {
+        if (i && fputc(',', stdout) == EOF)
+            goto io_error;
+        if (fputc('[', stdout) == EOF)
+            goto io_error;
+        for (j = 0; j < column_count; j++) {
+            if (j && fputc(',', stdout) == EOF)
+                goto io_error;
+            if (!query_json_string(j < rows[i].count ? rows[i].cells[j] : ""))
+                goto io_error;
+        }
+        if (fputc(']', stdout) == EOF)
+            goto io_error;
+    }
+    if (fprintf(stdout, "],\"row_count\":%lu}\n", (unsigned long)row_count) < 0)
+        goto io_error;
+    query_output_rows_free(rows, row_count);
+    return NG_OK;
+io_error:
+    query_output_rows_free(rows, row_count);
+    return NG_IO_ERROR;
+}
+
 static ng_status run_query_cli(ng_graph* graph,
                                const char* query,
                                query_format format,
@@ -1196,7 +1329,9 @@ static ng_status run_query_cli(ng_graph* graph,
         return NG_IO_ERROR;
     status = ng_query_execute(graph, query, output, mutated);
     if (status == NG_OK) {
-        if (format == QUERY_FORMAT_PLAIN ||
+        if (format == QUERY_FORMAT_JSON)
+            status = query_print_json(output, query);
+        else if (format == QUERY_FORMAT_PLAIN ||
             (format == QUERY_FORMAT_AUTO && !query_stdout_is_terminal()))
             status = query_copy_plain(output);
         else
