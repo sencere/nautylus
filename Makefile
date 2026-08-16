@@ -25,6 +25,8 @@ test: $(TEST_BIN) $(CLI)
 
 examples: $(EXAMPLE_BINS)
 
+bindings: $(SHARED_LIB)
+
 perf: $(CLI)
 	./$(CLI) bench $(BUILD_DIR)/perf.ng 1000
 
@@ -59,4 +61,4 @@ clean:
 	rm -rf $(BUILD_DIR) build-asan
 	rm -f test.ng
 
-.PHONY: all test examples perf clean
+.PHONY: all test examples bindings perf clean

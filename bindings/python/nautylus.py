@@ -2,7 +2,7 @@
 
 Build the shared library first:
 
-    make
+    make bindings
 
 By default this module loads ../../build/libnautylus.so relative to itself.
 Set NAUTYLUS_LIB to override the shared-library path.
@@ -25,7 +25,23 @@ def _default_library_path() -> str:
     return str(root / "build" / "libnautylus.so")
 
 
-_lib = ctypes.CDLL(os.environ.get("NAUTYLUS_LIB", _default_library_path()))
+def _load_library() -> ctypes.CDLL:
+    path = os.environ.get("NAUTYLUS_LIB", _default_library_path())
+    if not Path(path).exists():
+        raise RuntimeError(
+            "Nautylus shared library not found at "
+            f"{path}. Run `make bindings` from the repository root or set NAUTYLUS_LIB."
+        )
+    try:
+        return ctypes.CDLL(path)
+    except OSError as exc:
+        raise RuntimeError(
+            "Could not load Nautylus shared library at "
+            f"{path}: {exc}. Rebuild with `make bindings` or set NAUTYLUS_LIB."
+        ) from exc
+
+
+_lib = _load_library()
 
 GraphPtr = ctypes.c_void_p
 SymbolId = ctypes.c_uint64

@@ -20,8 +20,10 @@ Run examples from the repository root:
 Run language binding examples:
 
 ```sh
+make bindings
 PYTHONPATH=bindings/python python3 bindings/python/example.py
 php bindings/php/example.php
+LUA_PATH='bindings/lua/?.lua;;' luajit bindings/lua/example.lua
 ```
 
 ## Direct Graph API
@@ -95,5 +97,6 @@ validates the snapshot.
 
 ## Language Bindings
 
-Use `bindings/python/example.py` and `bindings/php/example.php` for lightweight
-FFI usage from Python and PHP. See [Language Bindings](bindings.md).
+Use `bindings/python/example.py`, `bindings/php/example.php`, and
+`bindings/lua/example.lua` for lightweight FFI usage from Python, PHP, and
+LuaJIT. See [Language Bindings](bindings.md).

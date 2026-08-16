@@ -60,7 +60,23 @@ CDEF;
             if (!$lib) {
                 $lib = dirname(__DIR__, 2) . '/build/libnautylus.so';
             }
-            self::$ffi = FFI::cdef(self::CDEF, $lib);
+            if (!is_file($lib)) {
+                throw new RuntimeException(
+                    "Nautylus shared library not found at {$lib}. " .
+                    "Run `make bindings` from the repository root or set NAUTYLUS_LIB."
+                );
+            }
+            try {
+                self::$ffi = FFI::cdef(self::CDEF, $lib);
+            } catch (FFI\Exception $e) {
+                throw new RuntimeException(
+                    "Could not load Nautylus shared library at {$lib}: " .
+                    $e->getMessage() .
+                    ". Rebuild with `make bindings` or set NAUTYLUS_LIB.",
+                    0,
+                    $e
+                );
+            }
         }
         return self::$ffi;
     }

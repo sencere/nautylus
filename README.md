@@ -39,7 +39,7 @@ make
 ```
 
 This builds `build/nautylus.o` for embedding and `build/nautylus` for command-line use.
-It also builds `build/libnautylus.so` for the Python and PHP FFI bindings.
+It also builds `build/libnautylus.so` for the Python, PHP, and LuaJIT FFI bindings.
 
 Run tests:
 
@@ -63,12 +63,15 @@ vector search, `cypher_gallery.cypher` for pasteable web/CLI queries, and
 Run binding examples:
 
 ```sh
+make bindings
 PYTHONPATH=bindings/python python3 bindings/python/example.py
 php bindings/php/example.php
+LUA_PATH='bindings/lua/?.lua;;' luajit bindings/lua/example.lua
 ```
 
 The Python binding uses standard-library `ctypes`. The PHP binding uses PHP FFI,
-so PHP must have FFI enabled. See [docs/bindings.md](docs/bindings.md).
+so PHP must have FFI enabled. The Lua binding uses LuaJIT FFI and must be run
+with `luajit`. See [docs/bindings.md](docs/bindings.md).
 
 Run the local performance smoke baseline:
 

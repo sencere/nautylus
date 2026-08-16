@@ -15,6 +15,15 @@ Run them from the repository root:
 ./build/graphsage_vector
 ```
 
+Run language binding examples:
+
+```sh
+make bindings
+PYTHONPATH=bindings/python python3 bindings/python/example.py
+php bindings/php/example.php
+LUA_PATH='bindings/lua/?.lua;;' luajit bindings/lua/example.lua
+```
+
 The examples intentionally create small local files such as `example.ng`,
 `cypher-example.ng`, `analytics-example.ng`, `graphsage-example.model`, and
 `graphsage-vectors.ngv`.
@@ -29,6 +38,7 @@ The examples intentionally create small local files such as `example.ng`,
 | `graphsage_vector.c` | GraphSAGE inference/training diagnostics, prediction helpers, exact vector search, random-projection approximate search, flat ANN search, HNSW-style search, vector-index persistence |
 | `cypher_gallery.cypher` | Pasteable MiniCypher examples for the CLI or web interface |
 | `cli_workflow.sh` | End-to-end CLI command examples |
+| `../bindings/lua/example.lua` | LuaJIT FFI graph creation, relationship properties, queries, save/open |
 
 ## CLI Query Formats
 

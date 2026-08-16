@@ -1,10 +1,10 @@
 # Language Bindings
 
-Nautylus ships lightweight FFI bindings for Python and PHP. They use the shared
-C library built by `make`:
+Nautylus ships lightweight FFI bindings for Python, PHP, and LuaJIT. They use
+the shared C library built by `make bindings`:
 
 ```sh
-make
+make bindings
 ```
 
 The default shared-library path is `build/libnautylus.so`. Set `NAUTYLUS_LIB`
@@ -18,6 +18,7 @@ dependency.
 Run the example:
 
 ```sh
+make bindings
 PYTHONPATH=bindings/python python3 bindings/python/example.py
 ```
 
@@ -54,6 +55,7 @@ The PHP binding uses PHP FFI. The PHP runtime must have FFI enabled.
 Run the example:
 
 ```sh
+make bindings
 php bindings/php/example.php
 ```
 
@@ -83,9 +85,53 @@ $graph->save();
 $graph->close();
 ```
 
+## Lua
+
+The Lua binding uses LuaJIT FFI. Run it with `luajit`; plain Lua does not expose
+the required FFI module.
+
+Run the example:
+
+```sh
+make bindings
+LUA_PATH='bindings/lua/?.lua;;' luajit bindings/lua/example.lua
+```
+
+From inside `bindings/lua`, this also works:
+
+```sh
+luajit example.lua
+```
+
+Minimal usage:
+
+```lua
+local nautylus = require("nautylus")
+
+local graph = nautylus.create("lua.ng")
+local person = graph:symbol("Person")
+local knows = graph:symbol("KNOWS")
+local name = graph:symbol("name")
+local since = graph:symbol("since")
+
+local joe = graph:create_node({ person })
+local bob = graph:create_node({ person })
+local rel = graph:create_relationship(joe, knows, bob)
+
+graph:set_node(joe, name, "Joe")
+graph:set_node(bob, name, "Bob")
+graph:set_relationship(rel, since, 2020)
+
+io.write(graph:query(
+    "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a.name, r.since, b.name"
+))
+graph:save()
+graph:close()
+```
+
 ## Current Binding Surface
 
-Both bindings currently expose:
+The Python, PHP, and Lua bindings currently expose:
 
 * `create` / `open` / `close` / `save`;
 * symbol interning;
