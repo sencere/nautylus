@@ -235,6 +235,23 @@ ng_status ng_node_delete(ng_graph* g, ng_node_id node);
 ng_status ng_node_set(ng_graph* g, ng_node_id node, ng_symbol_id key, const ng_value* v);
 ng_status
 ng_relationship_set(ng_graph* g, ng_relationship_id rel, ng_symbol_id key, const ng_value* v);
+ng_status ng_node_set_string(ng_graph* g,
+                             ng_node_id node,
+                             ng_symbol_id key,
+                             const char* value);
+ng_status ng_node_set_int64(ng_graph* g, ng_node_id node, ng_symbol_id key, int64_t value);
+ng_status ng_node_set_double(ng_graph* g, ng_node_id node, ng_symbol_id key, double value);
+ng_status ng_node_set_bool(ng_graph* g, ng_node_id node, ng_symbol_id key, int value);
+ng_status ng_relationship_set_string(ng_graph* g,
+                                     ng_relationship_id rel,
+                                     ng_symbol_id key,
+                                     const char* value);
+ng_status
+ng_relationship_set_int64(ng_graph* g, ng_relationship_id rel, ng_symbol_id key, int64_t value);
+ng_status
+ng_relationship_set_double(ng_graph* g, ng_relationship_id rel, ng_symbol_id key, double value);
+ng_status
+ng_relationship_set_bool(ng_graph* g, ng_relationship_id rel, ng_symbol_id key, int value);
 ng_status ng_node_unset(ng_graph* g, ng_node_id node, ng_symbol_id key);
 ng_status ng_relationship_unset(ng_graph* g, ng_relationship_id rel, ng_symbol_id key);
 size_t ng_node_count(const ng_graph* g);
@@ -643,5 +660,10 @@ ng_status ng_query_execute_params(ng_graph* g,
                                   size_t parameter_count,
                                   FILE* out,
                                   int* mutated);
+ng_status ng_query_print_file(const ng_graph* g, const char* query, const char* output_path);
+ng_status ng_query_execute_file(ng_graph* g,
+                                const char* query,
+                                const char* output_path,
+                                int* mutated);
 const char* ng_status_name(ng_status s);
 #endif

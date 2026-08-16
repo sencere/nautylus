@@ -17,6 +17,13 @@ Run examples from the repository root:
 ./build/graphsage_vector
 ```
 
+Run language binding examples:
+
+```sh
+PYTHONPATH=bindings/python python3 bindings/python/example.py
+php bindings/php/example.php
+```
+
 ## Direct Graph API
 
 Use `examples/basic.c` for the smallest checked C program. It creates labels,
@@ -85,3 +92,8 @@ Relevant docs:
 Use `examples/cli_workflow.sh` for an end-to-end command sequence. It creates a
 database, inserts data, runs tabular and JSON queries, prints stats, and
 validates the snapshot.
+
+## Language Bindings
+
+Use `bindings/python/example.py` and `bindings/php/example.php` for lightweight
+FFI usage from Python and PHP. See [Language Bindings](bindings.md).

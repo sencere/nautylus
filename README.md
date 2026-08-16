@@ -39,6 +39,7 @@ make
 ```
 
 This builds `build/nautylus.o` for embedding and `build/nautylus` for command-line use.
+It also builds `build/libnautylus.so` for the Python and PHP FFI bindings.
 
 Run tests:
 
@@ -58,6 +59,16 @@ The example folder now contains runnable coverage for the main surfaces:
 vector search, `cypher_gallery.cypher` for pasteable web/CLI queries, and
 `cli_workflow.sh` for an end-to-end command-line workflow. See
 [examples/README.md](examples/README.md).
+
+Run binding examples:
+
+```sh
+PYTHONPATH=bindings/python python3 bindings/python/example.py
+php bindings/php/example.php
+```
+
+The Python binding uses standard-library `ctypes`. The PHP binding uses PHP FFI,
+so PHP must have FFI enabled. See [docs/bindings.md](docs/bindings.md).
 
 Run the local performance smoke baseline:
 
@@ -560,6 +571,7 @@ Detailed evidence is in [STATUS.md](STATUS.md).
 * [docs/limits.md](docs/limits.md): tested limits and local performance baseline.
 * [docs/examples.md](docs/examples.md): runnable examples and query gallery.
 * [docs/graphsage.md](docs/graphsage.md): GraphSAGE, training, prediction, and vector-search APIs.
+* [docs/bindings.md](docs/bindings.md): Python and PHP FFI bindings.
 * [src/nautylus.h](src/nautylus.h): public C API.
 * [src/nautylus.c](src/nautylus.c): core library implementation.
 * [src/nautylus.c99main.c](src/nautylus.c99main.c): CLI entry point.

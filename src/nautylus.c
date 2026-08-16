@@ -1214,6 +1214,37 @@ ng_status ng_node_set(ng_graph* g, ng_id id, ng_symbol_id k, const ng_value* v) 
         return s;
     return setprop(&n->p, &n->np, &n->cap, k, v);
 }
+ng_status ng_node_set_string(ng_graph* g, ng_node_id node_id, ng_symbol_id key, const char* value) {
+    ng_value v;
+    if (!value)
+        return NG_INVALID_ARGUMENT;
+    memset(&v, 0, sizeof(v));
+    v.type = NG_VALUE_STRING;
+    v.length = strlen(value);
+    v.as.string = value;
+    return ng_node_set(g, node_id, key, &v);
+}
+ng_status ng_node_set_int64(ng_graph* g, ng_node_id node_id, ng_symbol_id key, int64_t value) {
+    ng_value v;
+    memset(&v, 0, sizeof(v));
+    v.type = NG_VALUE_INT64;
+    v.as.integer = value;
+    return ng_node_set(g, node_id, key, &v);
+}
+ng_status ng_node_set_double(ng_graph* g, ng_node_id node_id, ng_symbol_id key, double value) {
+    ng_value v;
+    memset(&v, 0, sizeof(v));
+    v.type = NG_VALUE_DOUBLE;
+    v.as.real = value;
+    return ng_node_set(g, node_id, key, &v);
+}
+ng_status ng_node_set_bool(ng_graph* g, ng_node_id node_id, ng_symbol_id key, int value) {
+    ng_value v;
+    memset(&v, 0, sizeof(v));
+    v.type = NG_VALUE_BOOL;
+    v.as.boolean = value ? 1 : 0;
+    return ng_node_set(g, node_id, key, &v);
+}
 static int ng_label_list_matches(const ng_symbol_id* l, size_t n, ng_symbol_id label) {
     size_t i;
     if (!label)
@@ -1311,6 +1342,43 @@ ng_status ng_relationship_set(ng_graph* g, ng_id id, ng_symbol_id k, const ng_va
         if (g->re[i].id == id)
             return setprop(&g->re[i].p, &g->re[i].np, &g->re[i].cap, k, v);
     return NG_NOT_FOUND;
+}
+ng_status ng_relationship_set_string(ng_graph* g,
+                                     ng_relationship_id rel,
+                                     ng_symbol_id key,
+                                     const char* value) {
+    ng_value v;
+    if (!value)
+        return NG_INVALID_ARGUMENT;
+    memset(&v, 0, sizeof(v));
+    v.type = NG_VALUE_STRING;
+    v.length = strlen(value);
+    v.as.string = value;
+    return ng_relationship_set(g, rel, key, &v);
+}
+ng_status
+ng_relationship_set_int64(ng_graph* g, ng_relationship_id rel, ng_symbol_id key, int64_t value) {
+    ng_value v;
+    memset(&v, 0, sizeof(v));
+    v.type = NG_VALUE_INT64;
+    v.as.integer = value;
+    return ng_relationship_set(g, rel, key, &v);
+}
+ng_status
+ng_relationship_set_double(ng_graph* g, ng_relationship_id rel, ng_symbol_id key, double value) {
+    ng_value v;
+    memset(&v, 0, sizeof(v));
+    v.type = NG_VALUE_DOUBLE;
+    v.as.real = value;
+    return ng_relationship_set(g, rel, key, &v);
+}
+ng_status
+ng_relationship_set_bool(ng_graph* g, ng_relationship_id rel, ng_symbol_id key, int value) {
+    ng_value v;
+    memset(&v, 0, sizeof(v));
+    v.type = NG_VALUE_BOOL;
+    v.as.boolean = value ? 1 : 0;
+    return ng_relationship_set(g, rel, key, &v);
 }
 static ng_status unsetprop(prop* p, size_t* n, ng_symbol_id k) {
     size_t i;
@@ -8216,6 +8284,19 @@ ng_status ng_query_print_params(
 ng_status ng_query_print(const ng_graph* g, const char* q, FILE* out) {
     return ng_query_print_params(g, q, NULL, 0, out);
 }
+ng_status ng_query_print_file(const ng_graph* g, const char* q, const char* output_path) {
+    FILE* out;
+    ng_status s;
+    if (!g || !q || !output_path)
+        return NG_INVALID_ARGUMENT;
+    out = fopen(output_path, "wb");
+    if (!out)
+        return NG_IO_ERROR;
+    s = ng_query_print(g, q, out);
+    if (fclose(out) != 0 && s == NG_OK)
+        s = NG_IO_ERROR;
+    return s;
+}
 static ng_status ng_query_parse_prop_map(const char** pp, ng_query_prop* props, size_t* count) {
     const char *p = ng_skip_ws(*pp), *s;
     size_t n;
@@ -14067,6 +14148,22 @@ ng_status ng_query_execute_params(
 }
 ng_status ng_query_execute(ng_graph* g, const char* q, FILE* out, int* mutated) {
     return ng_query_execute_params(g, q, NULL, 0, out, mutated);
+}
+ng_status ng_query_execute_file(ng_graph* g,
+                                const char* q,
+                                const char* output_path,
+                                int* mutated) {
+    FILE* out;
+    ng_status s;
+    if (!g || !q || !output_path)
+        return NG_INVALID_ARGUMENT;
+    out = fopen(output_path, "wb");
+    if (!out)
+        return NG_IO_ERROR;
+    s = ng_query_execute(g, q, out, mutated);
+    if (fclose(out) != 0 && s == NG_OK)
+        s = NG_IO_ERROR;
+    return s;
 }
 static int field(char** p, char* end, char** out) {
     char *s = *p, *q;

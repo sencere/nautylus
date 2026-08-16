@@ -9,6 +9,7 @@ TEST_DIR=tests
 EXAMPLE_DIR=examples
 
 LIB_OBJ=$(BUILD_DIR)/nautylus.o
+SHARED_LIB=$(BUILD_DIR)/libnautylus.so
 CLI_OBJ=$(BUILD_DIR)/nautylus.c99main.o
 TEST_OBJ=$(BUILD_DIR)/test_nautylus.o
 EXAMPLE_SRCS=$(wildcard $(EXAMPLE_DIR)/*.c)
@@ -17,7 +18,7 @@ EXAMPLE_BINS=$(patsubst $(EXAMPLE_DIR)/%.c,$(BUILD_DIR)/%,$(EXAMPLE_SRCS))
 CLI=$(BUILD_DIR)/nautylus
 TEST_BIN=$(BUILD_DIR)/test_nautylus
 
-all: $(CLI)
+all: $(CLI) $(SHARED_LIB)
 
 test: $(TEST_BIN) $(CLI)
 	./$(TEST_BIN)
@@ -32,6 +33,9 @@ $(BUILD_DIR):
 
 $(CLI): $(LIB_OBJ) $(CLI_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)
+
+$(SHARED_LIB): $(SRC_DIR)/nautylus.c $(SRC_DIR)/nautylus.h | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) -fPIC -shared $(SRC_DIR)/nautylus.c -o $@ $(LDLIBS)
 
 $(TEST_BIN): $(LIB_OBJ) $(TEST_OBJ)
 	$(CC) $(CFLAGS) -o $@ $^ $(LDLIBS)

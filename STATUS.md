@@ -8,7 +8,7 @@ The project builds, tests, and produces a working `nautylus` CLI plus an embedda
 
 | Area | Implemented now | Remaining |
 | --- | --- | --- |
-| C99 foundation | Strict C99 build, typed values, dynamic storage, deterministic symbols, CRUD, validation, tests, CLI | Broader allocator hooks, more malformed-record coverage |
+| C99 foundation | Strict C99 build, typed values, dynamic storage, deterministic symbols, CRUD, validation, tests, CLI, shared library build, lightweight Python/PHP FFI bindings | Broader allocator hooks, more malformed-record coverage, broader language binding surface |
 | Graph representation | Directed relationships, labels, typed properties, enumeration, bounded breadth-first traversal, validation, incident-edge cleanup, rebuilt adjacency cache | Incremental adjacency maintenance, depth-first traversal ordering |
 | Import/export | Triple TSV/CSV, property-graph TSV, typed values, duplicate suppression, diagnostics, import rollback, deterministic export ordering, CLI workflows, `.nautylusbak` export guards | Stronger two-file crash recovery, more CLI flags |
 | Persistence | Portable single-file snapshots, little-endian encoding, versioned header, checksum, persisted node-property constraints, temporary-file write, pre-save validation, strict load checks | Per-section checksums, generation metadata, migrations, stronger durability semantics |
