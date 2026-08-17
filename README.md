@@ -20,6 +20,7 @@ Choose `nautylus` when you want:
 * a CLI that can import, validate, and export graph data;
 * deterministic, text-based interchange formats for tests and data pipelines;
 * a single-file portable snapshot with explicit validation;
+* owner-only file permissions for files Nautylus writes on POSIX systems;
 * no database server, background process, or runtime dependency.
 
 Current scale model:
@@ -27,6 +28,10 @@ Current scale model:
 * The whole graph is loaded into memory by `ng_open()`.
 * Mutations are in-memory until `ng_save()` succeeds.
 * `ng_close()` does not save automatically.
+* `ng_save()` and export/model/vector writes set owner-only file permissions on POSIX systems.
+
+Snapshots can also be encrypted with authenticated libsodium-backed file APIs
+and the `nautylus encrypt` / `nautylus decrypt` commands. See [docs/security.md](docs/security.md).
 * The regression suite currently covers small graphs, deterministic ordering, rollback behavior, typed values, and CLI workflows. No large-graph performance envelope is claimed yet.
 * A small local performance smoke baseline is available with `make perf`; see [docs/limits.md](docs/limits.md).
 * A `ng_graph` is not documented as thread-safe. Use one graph from one thread at a time unless you add external synchronization.
@@ -157,7 +162,7 @@ nautylus index-create DB LABEL KEY
 nautylus index-drop DB LABEL KEY
 nautylus indexes DB
 nautylus bench FILE NODE_COUNT
-nautylus serve DB PORT
+nautylus serve DB PORT [--auth-env VAR]
 nautylus search DB QUERY
 nautylus query DB QUERY [--format auto|verbose|plain|json]
 nautylus explain QUERY
@@ -413,6 +418,19 @@ Open `http://127.0.0.1:6180`. The workbench serves static assets from `resources
 
 The current workbench supports stats, MiniCypher query/explain, triple TSV import, sample graph creation, required/unique node-property constraints, exact-match index metadata, interactive graph rendering, a top query input, and a right-side node information panel with editable colors and typed node/relationship properties.
 
+For access control, set `NAUTYLUS_AUTH` to `username:password` before starting
+the server. The workbench and its API then require HTTP Basic Authentication:
+
+```sh
+NAUTYLUS_AUTH='admin:change-this-password' ./build/nautylus serve graph.ng 6180
+```
+
+The same setting can be selected explicitly with `serve DB PORT --auth-env
+VARIABLE`. Credentials are read from the process environment and are not stored
+in the database. Use HTTPS or an SSH tunnel before exposing the server beyond a
+trusted local machine; the built-in server does not provide TLS. See
+[docs/security.md](docs/security.md).
+
 ## File Formats
 
 ### Triple TSV
@@ -521,6 +539,8 @@ Save sequence:
 
 If validation, encoding, writing, or closing fails before the rename, the previous database file is left intact. Rename atomicity and crash durability depend on the operating system and filesystem; the current implementation does not fsync the containing directory.
 
+On POSIX systems, Nautylus applies owner-only permissions (`0600`) to native snapshots and other files it writes. This protects against accidental group/world readability under permissive umasks. It is not encryption or cryptographic authentication; use an encrypted filesystem or disk volume for sensitive data. See [docs/security.md](docs/security.md).
+
 Property-graph export writes two files. When replacing existing output files it stages temporary files and uses `.nautylusbak` backups to avoid knowingly leaving an old/new mismatch after ordinary rename errors. Existing `.nautylusbak` files block export with `NG_EXISTS`. Full crash recovery for every possible two-file rename interruption is not claimed yet.
 
 ## Determinism
@@ -574,7 +594,8 @@ Detailed evidence is in [STATUS.md](STATUS.md).
 * [docs/limits.md](docs/limits.md): tested limits and local performance baseline.
 * [docs/examples.md](docs/examples.md): runnable examples and query gallery.
 * [docs/graphsage.md](docs/graphsage.md): GraphSAGE, training, prediction, and vector-search APIs.
-* [docs/bindings.md](docs/bindings.md): Python and PHP FFI bindings.
+* [docs/bindings.md](docs/bindings.md): Python, PHP, and LuaJIT FFI bindings.
+* [docs/security.md](docs/security.md): current file-permission hardening and security limits.
 * [src/nautylus.h](src/nautylus.h): public C API.
 * [src/nautylus.c](src/nautylus.c): core library implementation.
 * [src/nautylus.c99main.c](src/nautylus.c99main.c): CLI entry point.

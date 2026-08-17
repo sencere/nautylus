@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 
 extern void ng_test_fail_after(size_t count);
 extern void ng_test_fail_reset(void);
@@ -96,6 +99,17 @@ static int same_file(const char* a, const char* b) {
     fclose(y);
     return 1;
 }
+#ifndef _WIN32
+static void assert_owner_only_file(const char* path) {
+    struct stat st;
+    assert(stat(path, &st) == 0);
+    assert((st.st_mode & 0777) == 0600);
+}
+#else
+static void assert_owner_only_file(const char* path) {
+    (void)path;
+}
+#endif
 static int match_count_cb(ng_node_id n, void* ctx) {
     (void)n;
     (*(size_t*)ctx)++;
@@ -295,7 +309,17 @@ int main(void) {
     assert(ng_relationship_create(g, a, w, b, &e) == NG_OK);
     assert(ng_relationship_create(g, b, w, a, &e) == NG_OK);
     assert(ng_save(g) == NG_OK);
+    assert_owner_only_file("test.ng");
     ng_close(g);
+    {
+        FILE* secure = fopen("secure.tmp", "wb");
+        assert(secure);
+        fputs("private\n", secure);
+        assert(fclose(secure) == 0);
+        assert(ng_secure_file("secure.tmp") == NG_OK);
+        assert_owner_only_file("secure.tmp");
+        remove("secure.tmp");
+    }
     assert(ng_open(&r, "test.ng") == NG_OK);
     assert(ng_validate(r) == NG_OK);
     assert(ng_procedure_register(r, "addValues", procedure_add, NULL) == NG_OK);
@@ -1188,8 +1212,12 @@ int main(void) {
         assert(ng_node_set(o, x, k3, &pv) == NG_OK);
         assert(ng_relationship_create(o, x, rt, y, &re) == NG_OK);
         assert(ng_export_property_graph(o, "order-n1.tsv", "order-r1.tsv") == NG_OK);
+        assert_owner_only_file("order-n1.tsv");
+        assert_owner_only_file("order-r1.tsv");
         before = ng_node_count(o);
         assert(ng_export_property_graph(o, "order-n2.tsv", "order-r2.tsv") == NG_OK);
+        assert_owner_only_file("order-n2.tsv");
+        assert_owner_only_file("order-r2.tsv");
         assert(same_file("order-n1.tsv", "order-n2.tsv") &&
                same_file("order-r1.tsv", "order-r2.tsv"));
         assert(ng_node_count(o) == before && ng_validate(o) == NG_OK);
@@ -4466,6 +4494,46 @@ int main(void) {
         ng_close(map_graph);
         remove("nested-map.ng");
         remove("nested-map.out");
+    }
+    {
+        ng_graph* encrypted = 0;
+        ng_graph* restored = 0;
+        unsigned char byte;
+        FILE* tampered;
+        assert(ng_create(&encrypted, "crypto-plain.ng") == NG_OK);
+        assert(ng_save(encrypted) == NG_OK);
+        assert(ng_encrypt_file("crypto-plain.ng", "crypto.ng", "secret") == NG_OK);
+        assert(ng_decrypt_file("crypto.ng", "crypto-restored.ng", "secret") == NG_OK);
+        assert(ng_open(&restored, "crypto-restored.ng") == NG_OK);
+        assert(ng_validate(restored) == NG_OK);
+        ng_close(restored);
+        assert(ng_decrypt_file("crypto.ng", "crypto-wrong.ng", "wrong") == NG_CORRUPT);
+        tampered = fopen("crypto-tampered.ng", "wb");
+        assert(tampered);
+        {
+            FILE* source = fopen("crypto.ng", "rb");
+            assert(source);
+            while (fread(&byte, 1, 1, source) == 1)
+                assert(fwrite(&byte, 1, 1, tampered) == 1);
+            assert(fclose(source) == 0);
+        }
+        assert(fclose(tampered) == 0);
+        tampered = fopen("crypto-tampered.ng", "r+b");
+        assert(tampered);
+        assert(fseek(tampered, 60, SEEK_SET) == 0);
+        assert(fread(&byte, 1, 1, tampered) == 1);
+        byte ^= 1;
+        assert(fseek(tampered, 60, SEEK_SET) == 0);
+        assert(fwrite(&byte, 1, 1, tampered) == 1);
+        assert(fclose(tampered) == 0);
+        assert(ng_decrypt_file("crypto-tampered.ng", "crypto-bad.ng", "secret") == NG_CORRUPT);
+        ng_close(encrypted);
+        remove("crypto-plain.ng");
+        remove("crypto.ng");
+        remove("crypto-restored.ng");
+        remove("crypto-wrong.ng");
+        remove("crypto-tampered.ng");
+        remove("crypto-bad.ng");
     }
     remove_import_files();
     remove("test.ng");

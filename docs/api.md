@@ -20,6 +20,8 @@ For runnable examples, build `make examples` and see:
 * `ng_close()` releases memory and does not save automatically.
 * `ng_save()` validates the graph before writing.
 * If `ng_save()` fails before rename, the old database file should remain intact.
+* On POSIX systems, files written by Nautylus are hardened to owner-only
+  permissions (`0600`) after creation and final rename.
 * Rename atomicity and crash durability depend on the operating system and filesystem.
 * The current implementation does not coordinate multiple writer processes.
 * `ng_graph` is not documented as thread-safe. Use one graph from one thread at a time, or add external synchronization.
@@ -169,6 +171,30 @@ if (ng_transaction_begin(g, &tx) == NG_OK) {
 `ng_transaction_rollback(tx)` discards the working copy. `ng_transaction_commit(tx)` validates the working graph and swaps it into the original graph. IDs allocated inside a rolled-back transaction may remain unused from the caller's point of view.
 
 Transactions are single-process and in-memory. They do not provide multi-process locking and do not write to disk unless the caller later calls `ng_save()`.
+
+## File Hardening
+
+`ng_secure_file(path)` applies Nautylus' file-permission policy to an existing
+file. On POSIX this sets `0600`; on non-POSIX builds it currently returns
+`NG_OK` without changing permissions.
+
+Nautylus calls this helper for snapshots, exports, model files, vector-index
+files, and binding-oriented query-output files. This is permission hardening,
+not encryption or cryptographic authentication. See [Security](security.md).
+
+The web workbench can require HTTP Basic Authentication by setting
+`NAUTYLUS_AUTH=username:password` before `nautylus serve`, or by selecting an
+environment variable with `--auth-env`. This protects HTTP requests only; the
+embedded C API and CLI continue to rely on operating-system access to the
+database file.
+
+`ng_encrypt_file(input, output, password)` and `ng_decrypt_file(input, output,
+password)` provide authenticated snapshot encryption using the runtime
+libsodium implementation. They use the separate `NGCRYPT1` envelope and return
+`NG_CORRUPT` for a wrong password or tampered ciphertext. The normal build
+loads libsodium dynamically on POSIX systems; if it is unavailable, encryption
+returns `NG_IO_ERROR`. Windows support is not provided by this optional path
+yet.
 
 ## Traversal
 

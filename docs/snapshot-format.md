@@ -33,6 +33,24 @@ Header layout:
 
 The current checksum is FNV-1a 32-bit. It detects accidental corruption but is not authentication.
 
+## Encrypted Envelope
+
+`ng_encrypt_file()` writes a separate `NGCRYPT1` envelope rather than changing
+the native snapshot format:
+
+```text
+magic: 8 bytes (`NGCRYPT1`)
+salt: 16 bytes
+nonce: 24 bytes
+ciphertext length: 8-byte little-endian integer
+ciphertext: authenticated XChaCha20-Poly1305 payload
+```
+
+The key is derived from the caller's password with Argon2id. Decryption verifies
+the authentication tag before writing the plaintext output. Encrypted files are
+not passed directly to `ng_open()`; decrypt them to a protected `.ng` snapshot
+first.
+
 ## Payload Layout
 
 All integers are little-endian unsigned 64-bit values unless noted otherwise.
@@ -171,6 +189,11 @@ Value payloads:
 5. Renames `FILE.tmp` over `FILE`.
 
 If validation, encoding, writing, or closing fails before rename, the old snapshot remains in place. Rename replacement is expected to be atomic on POSIX filesystems, but crash durability depends on filesystem behavior and directory sync semantics. The current implementation does not fsync the file or containing directory.
+
+On POSIX systems, `ng_save()` hardens the temporary and final snapshot paths to
+owner-only permissions (`0600`). This protects against permissive process umasks
+while the file is being written and after the final rename. It does not encrypt
+the snapshot or authenticate it cryptographically; see [Security](security.md).
 
 ## Determinism
 

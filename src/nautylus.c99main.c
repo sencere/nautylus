@@ -20,6 +20,8 @@ static void usage(FILE* out) {
     fprintf(out,
             "usage:\n"
             "  nautylus create FILE\n"
+            "  nautylus encrypt INPUT OUTPUT PASSWORD\n"
+            "  nautylus decrypt INPUT OUTPUT PASSWORD\n"
             "  nautylus open FILE\n"
             "  nautylus validate FILE\n"
             "  nautylus stats FILE\n"
@@ -42,7 +44,7 @@ static void usage(FILE* out) {
             "  nautylus index-drop DB LABEL KEY\n"
             "  nautylus indexes DB\n"
             "  nautylus bench FILE NODE_COUNT\n"
-            "  nautylus serve DB PORT\n"
+            "  nautylus serve DB PORT [--auth-env VAR]\n"
             "  nautylus search DB QUERY\n"
             "  nautylus query DB QUERY [--format auto|verbose|plain|json]\n"
             "  nautylus explain QUERY\n");
@@ -202,15 +204,16 @@ done:
 }
 
 #ifdef _WIN32
-static ng_status run_server(const char* path, size_t port) {
+static ng_status run_server(const char* path, size_t port, const char* credential) {
     (void)path;
     (void)port;
+    (void)credential;
     fprintf(stderr, "not supported\n");
     return NG_INVALID_ARGUMENT;
 }
 #else
 static void http_write_header(int fd, int code, const char* type, size_t length) {
-    const char* status = code == 200 ? "OK" : "Error";
+    const char* status = code == 200 ? "OK" : code == 401 ? "Unauthorized" : "Error";
     char header[256];
     int n = snprintf(header,
                      sizeof(header),
@@ -222,6 +225,82 @@ static void http_write_header(int fd, int code, const char* type, size_t length)
                      (unsigned long)length);
     if (n > 0 && write(fd, header, (size_t)n) < 0)
         return;
+}
+
+static int http_base64_value(char c) {
+    if (c >= 'A' && c <= 'Z')
+        return c - 'A';
+    if (c >= 'a' && c <= 'z')
+        return c - 'a' + 26;
+    if (c >= '0' && c <= '9')
+        return c - '0' + 52;
+    if (c == '+')
+        return 62;
+    if (c == '/')
+        return 63;
+    return -1;
+}
+
+static int http_basic_auth_valid(const char* request, const char* credential) {
+    const char* header;
+    const char* encoded;
+    char decoded[512];
+    size_t encoded_length = 0, decoded_length = 0, i;
+    if (!credential || !*credential)
+        return 1;
+    header = strstr(request, "\nAuthorization: Basic ");
+    if (!header)
+        return 0;
+    encoded = header + strlen("\nAuthorization: Basic ");
+    while (encoded[encoded_length] && encoded[encoded_length] != '\r' &&
+           encoded[encoded_length] != '\n' && encoded[encoded_length] != ' ') {
+        encoded_length++;
+        if (encoded_length > 682)
+            return 0;
+    }
+    if (!encoded_length || encoded_length % 4 != 0 || encoded_length / 4 * 3 >= sizeof(decoded))
+        return 0;
+    for (i = 0; i < encoded_length; i += 4) {
+        int a = http_base64_value(encoded[i]);
+        int b = http_base64_value(encoded[i + 1]);
+        int c = encoded[i + 2] == '=' ? 0 : http_base64_value(encoded[i + 2]);
+        int d = encoded[i + 3] == '=' ? 0 : http_base64_value(encoded[i + 3]);
+        if (a < 0 || b < 0 || c < 0 || d < 0 ||
+            (encoded[i + 2] == '=' && encoded[i + 3] != '='))
+            return 0;
+        decoded[decoded_length++] = (char)((a << 2) | (b >> 4));
+        if (encoded[i + 2] != '=')
+            decoded[decoded_length++] = (char)((b << 4) | (c >> 2));
+        if (encoded[i + 3] != '=')
+            decoded[decoded_length++] = (char)((c << 6) | d);
+    }
+    if (decoded_length >= sizeof(decoded))
+        return 0;
+    decoded[decoded_length] = 0;
+    if (strlen(credential) != decoded_length)
+        return 0;
+    {
+        unsigned char different = 0;
+        for (i = 0; i < decoded_length; i++)
+            different |= (unsigned char)(decoded[i] ^ credential[i]);
+        return different == 0;
+    }
+}
+
+static void http_send_unauthorized(int fd) {
+    const char* body = "authentication required\n";
+    size_t length = strlen(body);
+    char header[256];
+    int n = snprintf(header,
+                     sizeof(header),
+                     "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"nautylus\"\r\n"
+                     "Content-Type: text/plain; charset=utf-8\r\nContent-Length: %lu\r\n"
+                     "Connection: close\r\n\r\n",
+                     (unsigned long)length);
+    if (n > 0 && write(fd, header, (size_t)n) >= 0) {
+        if (write(fd, body, length) < 0)
+            return;
+    }
 }
 
 static void http_send(int fd, int code, const char* type, const char* body) {
@@ -856,7 +935,7 @@ static void handle_api(int fd, const char* db_path, const char* route, char* bod
     ng_close(g);
 }
 
-static void handle_client(int fd, const char* db_path) {
+static void handle_client(int fd, const char* db_path, const char* credential) {
     char request[65536], method[8], route[256], *body, *cl;
     ssize_t got;
     size_t content_length = 0, header_length;
@@ -866,6 +945,10 @@ static void handle_client(int fd, const char* db_path) {
     request[got] = 0;
     if (sscanf(request, "%7s %255s", method, route) != 2) {
         http_send(fd, 400, "text/plain", "bad request");
+        return;
+    }
+    if (!http_basic_auth_valid(request, credential)) {
+        http_send_unauthorized(fd);
         return;
     }
     body = strstr(request, "\r\n\r\n");
@@ -915,7 +998,7 @@ static void handle_client(int fd, const char* db_path) {
         http_send(fd, 404, "text/plain", "not found");
 }
 
-static ng_status run_server(const char* path, size_t port) {
+static ng_status run_server(const char* path, size_t port, const char* credential) {
     int server_fd;
     struct sockaddr_in addr;
     int one = 1;
@@ -939,7 +1022,7 @@ static ng_status run_server(const char* path, size_t port) {
         int client = accept(server_fd, 0, 0);
         if (client < 0)
             continue;
-        handle_client(client, path);
+        handle_client(client, path, credential);
         close(client);
     }
 }
@@ -1364,6 +1447,10 @@ int main(int argc, char** argv) {
         s = ng_create(&g, argv[2]);
         if (s == NG_OK)
             s = ng_save(g);
+    } else if (!strcmp(argv[1], "encrypt") && argc == 5) {
+        s = ng_encrypt_file(argv[2], argv[3], argv[4]);
+    } else if (!strcmp(argv[1], "decrypt") && argc == 5) {
+        s = ng_decrypt_file(argv[2], argv[3], argv[4]);
     } else if (!strcmp(argv[1], "open") && argc == 3) {
         s = ng_open(&g, argv[2]);
         if (s == NG_OK) {
@@ -1494,13 +1581,20 @@ int main(int argc, char** argv) {
             return 1;
         }
         s = run_bench(argv[2], node_count);
-    } else if (!strcmp(argv[1], "serve") && argc == 4) {
+    } else if (!strcmp(argv[1], "serve") && (argc == 4 || argc == 6)) {
         size_t port = 0;
+        const char* credential = getenv("NAUTYLUS_AUTH");
+        if (argc == 6 && (strcmp(argv[4], "--auth-env") || !argv[5][0])) {
+            usage(stderr);
+            return 2;
+        }
+        if (argc == 6)
+            credential = getenv(argv[5]);
         if (!parse_size_arg(argv[3], 1, 65535, &port)) {
             fprintf(stderr, "invalid argument\n");
             return 1;
         }
-        s = run_server(argv[2], port);
+        s = run_server(argv[2], port, credential);
     } else if (!strcmp(argv[1], "query") && (argc == 4 || argc == 6 || argc == 5)) {
         query_format format = QUERY_FORMAT_AUTO;
         int mutated = 0;

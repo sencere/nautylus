@@ -6,6 +6,9 @@
 #include <limits.h>
 #include <ctype.h>
 #include <math.h>
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
 #define NG_VALUE_PARAM ((ng_value_type)255)
 static size_t ng_test_fail_after_count;
 static int ng_test_failure_enabled;
@@ -396,6 +399,16 @@ ng_status ng_create(ng_graph** o, const char* p) {
         return NG_INVALID_ARGUMENT;
     return init(o, p);
 }
+ng_status ng_secure_file(const char* path) {
+    if (!path || !*path)
+        return NG_INVALID_ARGUMENT;
+#ifdef _WIN32
+    (void)path;
+    return NG_OK;
+#else
+    return chmod(path, S_IRUSR | S_IWUSR) == 0 ? NG_OK : NG_IO_ERROR;
+#endif
+}
 static void put64(unsigned char* p, uint64_t v) {
     size_t i;
     for (i = 0; i < 8; i++) {
@@ -545,6 +558,12 @@ ng_status ng_save(ng_graph* g) {
     put64(h + 24, hash32(b.p, b.n));
     (void)snprintf(tmp, sizeof(tmp), "%s.tmp", g->path);
     f = fopen(tmp, "wb");
+    if (f && ng_secure_file(tmp) != NG_OK) {
+        fclose(f);
+        remove(tmp);
+        free(b.p);
+        return NG_IO_ERROR;
+    }
     if (!f || fwrite(h, 1, 32, f) != 32 || fwrite(b.p, 1, b.n, f) != b.n || fclose(f) != 0) {
         if (f)
             fclose(f);
@@ -554,6 +573,10 @@ ng_status ng_save(ng_graph* g) {
     }
     if (rename(tmp, g->path) != 0) {
         remove(tmp);
+        free(b.p);
+        return NG_IO_ERROR;
+    }
+    if (ng_secure_file(g->path) != NG_OK) {
         free(b.p);
         return NG_IO_ERROR;
     }
@@ -4371,6 +4394,10 @@ ng_status ng_graphsage_model_save(const ng_graphsage_model* model, const char* p
     file = fopen(path, "wb");
     if (!file)
         return NG_IO_ERROR;
+    if (ng_secure_file(path) != NG_OK) {
+        fclose(file);
+        return NG_IO_ERROR;
+    }
     if (!ng_graphsage_write(file, &magic, sizeof(magic)) ||
         !ng_graphsage_write(file, &model->layers, sizeof(model->layers)) ||
         !ng_graphsage_write(file, &model->input_dimensions, sizeof(model->input_dimensions)) ||
@@ -4389,7 +4416,9 @@ ng_status ng_graphsage_model_save(const ng_graphsage_model* model, const char* p
             return NG_IO_ERROR;
         }
     }
-    return fclose(file) == 0 ? NG_OK : NG_IO_ERROR;
+    if (fclose(file) != 0)
+        return NG_IO_ERROR;
+    return ng_secure_file(path);
 }
 ng_status ng_graphsage_model_load(const char* path, ng_graphsage_model** out) {
     FILE* file;
@@ -5026,6 +5055,10 @@ ng_status ng_vector_index_save(const ng_vector_index* index, const char* path) {
     file = fopen(path, "wb");
     if (!file)
         return NG_IO_ERROR;
+    if (ng_secure_file(path) != NG_OK) {
+        fclose(file);
+        return NG_IO_ERROR;
+    }
     if (index->vector_count > SIZE_MAX / index->dimensions ||
         index->vector_count * index->dimensions > SIZE_MAX / sizeof(double)) {
         fclose(file);
@@ -5065,7 +5098,9 @@ ng_status ng_vector_index_save(const ng_vector_index* index, const char* path) {
         fclose(file);
         return NG_IO_ERROR;
     }
-    return fclose(file) == 0 ? NG_OK : NG_IO_ERROR;
+    if (fclose(file) != 0)
+        return NG_IO_ERROR;
+    return ng_secure_file(path);
 }
 ng_status ng_vector_index_load(const char* path, ng_vector_index** out) {
     FILE* file;
@@ -8292,9 +8327,16 @@ ng_status ng_query_print_file(const ng_graph* g, const char* q, const char* outp
     out = fopen(output_path, "wb");
     if (!out)
         return NG_IO_ERROR;
+    s = ng_secure_file(output_path);
+    if (s != NG_OK) {
+        fclose(out);
+        return s;
+    }
     s = ng_query_print(g, q, out);
     if (fclose(out) != 0 && s == NG_OK)
         s = NG_IO_ERROR;
+    if (s == NG_OK)
+        s = ng_secure_file(output_path);
     return s;
 }
 static ng_status ng_query_parse_prop_map(const char** pp, ng_query_prop* props, size_t* count) {
@@ -14160,9 +14202,16 @@ ng_status ng_query_execute_file(ng_graph* g,
     out = fopen(output_path, "wb");
     if (!out)
         return NG_IO_ERROR;
+    s = ng_secure_file(output_path);
+    if (s != NG_OK) {
+        fclose(out);
+        return s;
+    }
     s = ng_query_execute(g, q, out, mutated);
     if (fclose(out) != 0 && s == NG_OK)
         s = NG_IO_ERROR;
+    if (s == NG_OK)
+        s = ng_secure_file(output_path);
     return s;
 }
 static int field(char** p, char* end, char** out) {
@@ -14374,6 +14423,10 @@ ng_status ng_export_triples(const ng_graph* g, const char* file) {
     f = !strcmp(file, "-") ? stdout : fopen(file, "wb");
     if (!f)
         return NG_IO_ERROR;
+    if (f != stdout && ng_secure_file(file) != NG_OK) {
+        fclose(f);
+        return NG_IO_ERROR;
+    }
     for (i = 0; i < g->nr; i++) {
         const node_i *a = node((ng_graph*)g, g->re[i].src), *b = node((ng_graph*)g, g->re[i].dst);
         const prop *ap = a ? findprop(a->p, a->np, ek) : NULL,
@@ -14392,8 +14445,11 @@ ng_status ng_export_triples(const ng_graph* g, const char* file) {
             return NG_IO_ERROR;
         }
     }
-    if (f != stdout && fclose(f) != 0)
-        return NG_IO_ERROR;
+    if (f != stdout) {
+        if (fclose(f) != 0)
+            return NG_IO_ERROR;
+        return ng_secure_file(file);
+    }
     return NG_OK;
 }
 ng_status ng_import_triples_diagnostic(ng_graph* g,
@@ -15454,9 +15510,15 @@ ng_status ng_export_property_graph(const ng_graph* g,
     nf = fopen(nt, "wb");
     if (!nf)
         goto io;
+    st = ng_secure_file(nt);
+    if (st != NG_OK)
+        goto fail;
     rf = fopen(rt, "wb");
     if (!rf)
         goto io;
+    st = ng_secure_file(rt);
+    if (st != NG_OK)
+        goto fail;
     for (last = 0;;) {
         ng_node_id id = 0;
         for (i = 0; i < g->nn; i++)
@@ -15550,6 +15612,12 @@ ng_status ng_export_property_graph(const ng_graph* g,
     st = ng_commit_pair(nt, rt, nodes_file, relationships_file, nb, rb);
     if (st != NG_OK)
         goto fail_closed;
+    st = ng_secure_file(nodes_file);
+    if (st != NG_OK)
+        return st;
+    st = ng_secure_file(relationships_file);
+    if (st != NG_OK)
+        return st;
     return NG_OK;
 unsupported:
     st = NG_INVALID_ARGUMENT;

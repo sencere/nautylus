@@ -12,6 +12,7 @@ The project builds, tests, and produces a working `nautylus` CLI plus an embedda
 | Graph representation | Directed relationships, labels, typed properties, enumeration, bounded breadth-first traversal, validation, incident-edge cleanup, rebuilt adjacency cache | Incremental adjacency maintenance, depth-first traversal ordering |
 | Import/export | Triple TSV/CSV, property-graph TSV, typed values, duplicate suppression, diagnostics, import rollback, deterministic export ordering, CLI workflows, `.nautylusbak` export guards | Stronger two-file crash recovery, more CLI flags |
 | Persistence | Portable single-file snapshots, little-endian encoding, versioned header, checksum, persisted node-property constraints, temporary-file write, pre-save validation, strict load checks | Per-section checksums, generation metadata, migrations, stronger durability semantics |
+| Security | POSIX owner-only file hardening, optional web-workbench HTTP Basic Authentication, authenticated `NGCRYPT1` snapshot encryption/decryption, corruption-detection checksum and strict loading | Key rotation, role-based access control |
 | Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `UNWIND`, `OPTIONAL MATCH`, parameters, aggregates, `ORDER BY`, `SKIP`/`LIMIT`, `UNION`/`UNION ALL`/`UNION DISTINCT`, rollback-protected `CREATE`/`MERGE`/`SET`/`REMOVE`/`DELETE`/`DETACH DELETE`, nested map expressions in projections and writes, list indexing/slicing/concatenation/comprehensions, searched `CASE`, fixed and bounded variable-length path bindings with `nodes()`/`relationships()`, generic `MERGE` `ON CREATE SET`/`ON MATCH SET`, graph-registered procedures with typed node/relationship arguments and result aliases, seeded `randomWalk` procedure, `EXPLAIN` text | Full Cypher compatibility, direct path rendering, subqueries |
 | Transactions/indexes | Public in-memory transaction API, commit, rollback, persistent index metadata, snapshot node index rebuilding | Multi-process conflicts, durable transaction journal, materialized persistent indexes |
 | Release quality | Strict C99 tests, CLI regression coverage, documented tested limits, small local performance baseline, ASan/UBSan run with LeakSanitizer disabled in this environment | CI, fuzzing, profiling |
@@ -47,7 +48,7 @@ nautylus index-create DB LABEL KEY
 nautylus index-drop DB LABEL KEY
 nautylus indexes DB
 nautylus bench FILE NODE_COUNT
-nautylus serve DB PORT
+nautylus serve DB PORT [--auth-env VAR]
 nautylus search DB QUERY
 nautylus query DB QUERY [--format auto|verbose|plain|json]
 nautylus explain QUERY
