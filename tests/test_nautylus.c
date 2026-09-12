@@ -1258,6 +1258,7 @@ int main(void) {
         assert(fclose(f) == 0);
         r = 0;
         assert(ng_open(&r, "tail.ng") == NG_CORRUPT);
+        assert(r == 0);
         remove("tail.ng");
     }
     {

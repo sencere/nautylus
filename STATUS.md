@@ -1,21 +1,21 @@
 # Status
 
-Current deployability: **usable alpha**.
+Current deployability: **deployable alpha**.
 
-The project builds, tests, and produces a working `nautylus` CLI plus an embeddable C99 library for the implemented features. It is not feature-complete against the full specification in `agent.md`.
+The project builds, tests, installs, and produces a working `nautylus` CLI plus embeddable static/shared C99 libraries for the implemented features. It is not feature-complete against the full specification in `agent.md`.
 
 ## Capability Summary
 
 | Area | Implemented now | Remaining |
 | --- | --- | --- |
-| C99 foundation | Strict C99 build, typed values, dynamic storage, deterministic symbols, CRUD, validation, tests, CLI, shared library build, lightweight Python/PHP/LuaJIT FFI bindings | Broader allocator hooks, more malformed-record coverage, broader language binding surface |
+| C99 foundation | Strict C99 build, typed values, dynamic storage, deterministic symbols, CRUD, validation, tests, CLI, static/shared library builds, pkg-config metadata, install/uninstall targets, lightweight Python/PHP/LuaJIT FFI bindings | Broader allocator hooks, more malformed-record coverage, broader language binding surface |
 | Graph representation | Directed relationships, labels, typed properties, enumeration, bounded breadth-first traversal, validation, incident-edge cleanup, rebuilt adjacency cache | Incremental adjacency maintenance, depth-first traversal ordering |
 | Import/export | Triple TSV/CSV, property-graph TSV, typed values, duplicate suppression, diagnostics, import rollback, deterministic export ordering, CLI workflows, `.nautylusbak` export guards | Stronger two-file crash recovery, more CLI flags |
-| Persistence | Portable single-file snapshots, little-endian encoding, versioned header, checksum, persisted node-property constraints, temporary-file write, pre-save validation, strict load checks | Per-section checksums, generation metadata, migrations, stronger durability semantics |
+| Persistence | Portable single-file snapshots, little-endian encoding, versioned header, checksum, persisted node-property constraints, temporary-file write, pre-save validation, strict load checks, POSIX file and directory sync | Per-section checksums, generation metadata, migrations |
 | Security | POSIX owner-only file hardening, optional web-workbench HTTP Basic Authentication, authenticated `NGCRYPT1` snapshot encryption/decryption, corruption-detection checksum and strict loading | Key rotation, role-based access control |
 | Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `UNWIND`, `OPTIONAL MATCH`, parameters, aggregates, `ORDER BY`, `SKIP`/`LIMIT`, `UNION`/`UNION ALL`/`UNION DISTINCT`, rollback-protected `CREATE`/`MERGE`/`SET`/`REMOVE`/`DELETE`/`DETACH DELETE`, nested map expressions in projections and writes, list indexing/slicing/concatenation/comprehensions, searched `CASE`, fixed and bounded variable-length path bindings with `nodes()`/`relationships()`, generic `MERGE` `ON CREATE SET`/`ON MATCH SET`, graph-registered procedures with typed node/relationship arguments and result aliases, seeded `randomWalk` procedure, `EXPLAIN` text | Full Cypher compatibility, direct path rendering, subqueries |
 | Transactions/indexes | Public in-memory transaction API, commit, rollback, persistent index metadata, snapshot node index rebuilding | Multi-process conflicts, durable transaction journal, materialized persistent indexes |
-| Release quality | Strict C99 tests, CLI regression coverage, documented tested limits, small local performance baseline, ASan/UBSan run with LeakSanitizer disabled in this environment | CI, fuzzing, profiling |
+| Release quality | Strict C99 tests, CLI regression coverage, fuzz harness with corpus smoke, documented tested limits, small local performance baseline, `make release-check`, `make sanitizer`, `make fuzz-smoke`, `make fuzz`, `make profile`, GCC/Clang GitHub Actions CI | Broader fuzz corpus, longer-running performance tracking |
 | Web/server | Local POSIX HTTP workbench for stats, query/explain, triple import, sample data, constraints, index metadata, interactive graph rendering, node/relationship inspection, typed node properties, and label color editing | Broader API, non-POSIX support |
 | Analytics | Degree centrality, PageRank, eigenvector, closeness, and harmonic centrality, FastRP-style seeded embeddings, lightweight Node2Vec- and GraphSAGE-style embeddings, configurable GraphSAGE model inference/training with sampling, normalization, mini-batches, validation splits, compact sampled subgraph training, cached sampled-neighborhood reuse, reusable gradient buffers, analytic MSE, binary cross-entropy, and softmax cross-entropy backpropagation, optimized split reporting, epoch diagnostics, convergence status, validation-selection reporting, classification metrics, prediction helpers, model save/load, exact vector-index persistence, approximate random-projection vector search with tunable candidates, flat indexed ANN graph search, HNSW-style multi-layer ANN indexing/search with tunable `M`/`efConstruction`/`efSearch` and persistence, and cosine vector search, weak/strong components, triangle count, local clustering coefficient, articulation points, bridges, common-neighbor, Adamic-Adar, and resource-allocation link prediction, topological sort, minimum spanning tree, maximum flow, seeded random walks, weighted Dijkstra, unweighted BFS, callback-based DFS path enumeration, heuristic-driven A*, deterministic label propagation, Louvain-style local moving, Jaccard KNN similarity, and label-filtered KNN | Multilevel Louvain/Leiden aggregation, richer filtered similarity, scalable implementations |
 
@@ -48,7 +48,7 @@ nautylus index-create DB LABEL KEY
 nautylus index-drop DB LABEL KEY
 nautylus indexes DB
 nautylus bench FILE NODE_COUNT
-nautylus serve DB PORT [--auth-env VAR]
+nautylus serve DB PORT [--auth-env VAR] [--read-only] [--max-request BYTES]
 nautylus search DB QUERY
 nautylus query DB QUERY [--format auto|verbose|plain|json]
 nautylus explain QUERY
@@ -56,19 +56,26 @@ nautylus explain QUERY
 
 ## Latest Evidence
 
-`make test` passes under:
+`make release-check` passes under:
 
 ```sh
 cc -std=c99 -Wall -Wextra -Wpedantic -O2
 ```
 
-An ASan/UBSan build also passes when run as:
+It performs a clean build of the CLI, static library, shared library, pkg-config file, tests, examples, and fuzz corpus smoke.
+
+`make sanitizer` passes with:
 
 ```sh
-ASAN_OPTIONS=detect_leaks=0 ./build/test_nautylus
+ASAN_OPTIONS=detect_leaks=0
+UBSAN_OPTIONS=print_stacktrace=1
+CFLAGS='-std=c99 -Wall -Wextra -Wpedantic -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer'
 ```
 
 LeakSanitizer itself is disabled for that run because this execution environment reports ptrace incompatibility.
+
+`make profile` runs deterministic benchmark sizes through the CLI and stores
+per-size output under `build/profile/`.
 
 Regression coverage includes:
 
@@ -118,12 +125,12 @@ Regression coverage includes:
 Near-term:
 
 1. Add platform-specific export rename failure tests.
-2. Expand malformed-record and constraint edge-case coverage.
+2. Expand malformed-record and fuzz corpus coverage.
 3. Add scoped subqueries and procedure signatures.
 
 Larger product directions:
 
 * stronger snapshot migration policy;
-* CI across GCC/Clang and supported operating systems;
-* fuzzing;
+* CI across additional supported operating systems;
+* longer-running fuzzing and profiling jobs;
 * richer HTTP/API/web interface outside the core library.

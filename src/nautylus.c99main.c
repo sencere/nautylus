@@ -14,7 +14,7 @@
 #include <io.h>
 #endif
 
-#define NAUTYLUS_VERSION "0.1.0-alpha"
+enum { NAUTYLUS_HTTP_MAX_REQUEST = 65535 };
 
 static void usage(FILE* out) {
     fprintf(out,
@@ -44,7 +44,7 @@ static void usage(FILE* out) {
             "  nautylus index-drop DB LABEL KEY\n"
             "  nautylus indexes DB\n"
             "  nautylus bench FILE NODE_COUNT\n"
-            "  nautylus serve DB PORT [--auth-env VAR]\n"
+            "  nautylus serve DB PORT [--auth-env VAR] [--read-only] [--max-request BYTES]\n"
             "  nautylus search DB QUERY\n"
             "  nautylus query DB QUERY [--format auto|verbose|plain|json]\n"
             "  nautylus explain QUERY\n");
@@ -204,14 +204,25 @@ done:
 }
 
 #ifdef _WIN32
-static ng_status run_server(const char* path, size_t port, const char* credential) {
+typedef struct {
+    const char* credential;
+    int read_only;
+    size_t max_request;
+} server_options;
+static ng_status run_server(const char* path, size_t port, const server_options* options) {
     (void)path;
     (void)port;
-    (void)credential;
+    (void)options;
     fprintf(stderr, "not supported\n");
     return NG_INVALID_ARGUMENT;
 }
 #else
+typedef struct {
+    const char* credential;
+    int read_only;
+    size_t max_request;
+} server_options;
+
 static void http_write_header(int fd, int code, const char* type, size_t length) {
     const char* status = code == 200 ? "OK" : code == 401 ? "Unauthorized" : "Error";
     char header[256];
@@ -837,11 +848,55 @@ static char* capture_graph_json(const char* db_path, ng_status* status) {
     return json;
 }
 
-static void handle_api(int fd, const char* db_path, const char* route, char* body) {
+static int api_route_mutates(const char* route) {
+    return !strcmp(route, "/api/sample") || !strcmp(route, "/api/import-triples") ||
+           !strcmp(route, "/api/query") || !strncmp(route, "/api/constraint-", 16) ||
+           !strcmp(route, "/api/index-create");
+}
+
+static int query_write_keyword(const char* p, const char* keyword) {
+    size_t n = strlen(keyword);
+    size_t i;
+    for (i = 0; i < n; i++)
+        if (toupper((unsigned char)p[i]) != (unsigned char)keyword[i])
+            return 0;
+    return !isalnum((unsigned char)p[n]) && p[n] != '_';
+}
+
+static int query_text_mutates(const char* query) {
+    const char* p = query;
+    int in_string = 0;
+    if (!p)
+        return 0;
+    while (*p) {
+        if (*p == '"' && (p == query || p[-1] != '\\')) {
+            in_string = !in_string;
+        } else if (!in_string &&
+                   (p == query || (!isalnum((unsigned char)p[-1]) && p[-1] != '_')) &&
+                   (query_write_keyword(p, "CREATE") || query_write_keyword(p, "MERGE") ||
+                    query_write_keyword(p, "SET") || query_write_keyword(p, "REMOVE") ||
+                    query_write_keyword(p, "DELETE") || query_write_keyword(p, "DETACH"))) {
+            return 1;
+        }
+        p++;
+    }
+    return 0;
+}
+
+static void handle_api(int fd,
+                       const char* db_path,
+                       const char* route,
+                       char* body,
+                       const server_options* options) {
     ng_graph* g = 0;
     ng_status s = NG_OK;
     char* out = 0;
     char tmp[4096] = "";
+    if (options && options->read_only && api_route_mutates(route) &&
+        (strcmp(route, "/api/query") || query_text_mutates(body))) {
+        http_send(fd, 403, "text/plain", "read only\n");
+        return;
+    }
     if (!strcmp(route, "/api/sample")) {
         s = create_sample(db_path);
         http_send(
@@ -935,11 +990,14 @@ static void handle_api(int fd, const char* db_path, const char* route, char* bod
     ng_close(g);
 }
 
-static void handle_client(int fd, const char* db_path, const char* credential) {
+static void handle_client(int fd, const char* db_path, const server_options* options) {
     char request[65536], method[8], route[256], *body, *cl;
     ssize_t got;
     size_t content_length = 0, header_length;
-    got = read(fd, request, sizeof(request) - 1);
+    size_t max_request = options && options->max_request ? options->max_request : sizeof(request) - 1;
+    if (max_request >= sizeof(request))
+        max_request = sizeof(request) - 1;
+    got = read(fd, request, max_request);
     if (got <= 0)
         return;
     request[got] = 0;
@@ -947,7 +1005,7 @@ static void handle_client(int fd, const char* db_path, const char* credential) {
         http_send(fd, 400, "text/plain", "bad request");
         return;
     }
-    if (!http_basic_auth_valid(request, credential)) {
+    if (!http_basic_auth_valid(request, options ? options->credential : NULL)) {
         http_send_unauthorized(fd);
         return;
     }
@@ -960,13 +1018,28 @@ static void handle_client(int fd, const char* db_path, const char* credential) {
     cl = strstr(request, "Content-Length:");
     if (cl)
         content_length = (size_t)strtoul(cl + 15, 0, 10);
+    if (content_length > max_request) {
+        http_send(fd, 413, "text/plain", "request too large");
+        return;
+    }
     header_length = (size_t)(body - request);
-    while (content_length > (size_t)got - header_length && (size_t)got < sizeof(request) - 1) {
-        ssize_t more = read(fd, request + got, sizeof(request) - 1 - (size_t)got);
+    if (header_length + content_length > max_request) {
+        http_send(fd, 413, "text/plain", "request too large");
+        return;
+    }
+    while (content_length > (size_t)got - header_length && (size_t)got < max_request) {
+        size_t available = sizeof(request) - 1 - (size_t)got;
+        if (available > max_request - (size_t)got)
+            available = max_request - (size_t)got;
+        ssize_t more = read(fd, request + got, available);
         if (more <= 0)
             break;
         got += more;
         request[got] = 0;
+    }
+    if (content_length > (size_t)got - header_length) {
+        http_send(fd, 413, "text/plain", "request too large");
+        return;
     }
     if (!strcmp(route, "/")) {
         size_t n = 0;
@@ -993,12 +1066,12 @@ static void handle_client(int fd, const char* db_path, const char* credential) {
         } else
             http_send(fd, 404, "text/plain", "not found");
     } else if (!strncmp(route, "/api/", 5))
-        handle_api(fd, db_path, route, body);
+        handle_api(fd, db_path, route, body, options);
     else
         http_send(fd, 404, "text/plain", "not found");
 }
 
-static ng_status run_server(const char* path, size_t port, const char* credential) {
+static ng_status run_server(const char* path, size_t port, const server_options* options) {
     int server_fd;
     struct sockaddr_in addr;
     int one = 1;
@@ -1022,7 +1095,7 @@ static ng_status run_server(const char* path, size_t port, const char* credentia
         int client = accept(server_fd, 0, 0);
         if (client < 0)
             continue;
-        handle_client(client, path, credential);
+        handle_client(client, path, options);
         close(client);
     }
 }
@@ -1581,20 +1654,33 @@ int main(int argc, char** argv) {
             return 1;
         }
         s = run_bench(argv[2], node_count);
-    } else if (!strcmp(argv[1], "serve") && (argc == 4 || argc == 6)) {
+    } else if (!strcmp(argv[1], "serve") && argc >= 4) {
+        server_options options;
+        int argi;
         size_t port = 0;
-        const char* credential = getenv("NAUTYLUS_AUTH");
-        if (argc == 6 && (strcmp(argv[4], "--auth-env") || !argv[5][0])) {
-            usage(stderr);
-            return 2;
+        options.credential = getenv("NAUTYLUS_AUTH");
+        options.read_only = 0;
+        options.max_request = NAUTYLUS_HTTP_MAX_REQUEST;
+        for (argi = 4; argi < argc; argi++) {
+            if (!strcmp(argv[argi], "--read-only")) {
+                options.read_only = 1;
+            } else if (!strcmp(argv[argi], "--auth-env") && argi + 1 < argc && argv[argi + 1][0]) {
+                options.credential = getenv(argv[++argi]);
+            } else if (!strcmp(argv[argi], "--max-request") && argi + 1 < argc) {
+                if (!parse_size_arg(argv[++argi], 1, NAUTYLUS_HTTP_MAX_REQUEST, &options.max_request)) {
+                    fprintf(stderr, "invalid argument\n");
+                    return 1;
+                }
+            } else {
+                usage(stderr);
+                return 2;
+            }
         }
-        if (argc == 6)
-            credential = getenv(argv[5]);
         if (!parse_size_arg(argv[3], 1, 65535, &port)) {
             fprintf(stderr, "invalid argument\n");
             return 1;
         }
-        s = run_server(argv[2], port, credential);
+        s = run_server(argv[2], port, &options);
     } else if (!strcmp(argv[1], "query") && (argc == 4 || argc == 6 || argc == 5)) {
         query_format format = QUERY_FORMAT_AUTO;
         int mutated = 0;

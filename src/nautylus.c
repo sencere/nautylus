@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "nautylus.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,7 +8,9 @@
 #include <ctype.h>
 #include <math.h>
 #ifndef _WIN32
+#include <fcntl.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 #define NG_VALUE_PARAM ((ng_value_type)255)
 static size_t ng_test_fail_after_count;
@@ -409,6 +412,48 @@ ng_status ng_secure_file(const char* path) {
     return chmod(path, S_IRUSR | S_IWUSR) == 0 ? NG_OK : NG_IO_ERROR;
 #endif
 }
+static ng_status ng_flush_file(FILE* f) {
+    if (!f || fflush(f) != 0)
+        return NG_IO_ERROR;
+#ifndef _WIN32
+    if (fsync(fileno(f)) != 0)
+        return NG_IO_ERROR;
+#endif
+    return NG_OK;
+}
+static ng_status ng_sync_parent_dir(const char* path) {
+#ifdef _WIN32
+    (void)path;
+    return NG_OK;
+#else
+    char dir[4096];
+    const char* slash;
+    int fd;
+    size_t len;
+    if (!path || !*path)
+        return NG_INVALID_ARGUMENT;
+    slash = strrchr(path, '/');
+    if (!slash)
+        strcpy(dir, ".");
+    else if (slash == path)
+        strcpy(dir, "/");
+    else {
+        len = (size_t)(slash - path);
+        if (len >= sizeof(dir))
+            return NG_INVALID_ARGUMENT;
+        memcpy(dir, path, len);
+        dir[len] = 0;
+    }
+    fd = open(dir, O_RDONLY);
+    if (fd < 0)
+        return NG_IO_ERROR;
+    if (fsync(fd) != 0) {
+        close(fd);
+        return NG_IO_ERROR;
+    }
+    return close(fd) == 0 ? NG_OK : NG_IO_ERROR;
+#endif
+}
 static void put64(unsigned char* p, uint64_t v) {
     size_t i;
     for (i = 0; i < 8; i++) {
@@ -564,15 +609,25 @@ ng_status ng_save(ng_graph* g) {
         free(b.p);
         return NG_IO_ERROR;
     }
-    if (!f || fwrite(h, 1, 32, f) != 32 || fwrite(b.p, 1, b.n, f) != b.n || fclose(f) != 0) {
+    if (!f || fwrite(h, 1, 32, f) != 32 || fwrite(b.p, 1, b.n, f) != b.n ||
+        ng_flush_file(f) != NG_OK) {
         if (f)
             fclose(f);
         remove(tmp);
         free(b.p);
         return NG_IO_ERROR;
     }
+    if (fclose(f) != 0) {
+        remove(tmp);
+        free(b.p);
+        return NG_IO_ERROR;
+    }
     if (rename(tmp, g->path) != 0) {
         remove(tmp);
+        free(b.p);
+        return NG_IO_ERROR;
+    }
+    if (ng_sync_parent_dir(g->path) != NG_OK) {
         free(b.p);
         return NG_IO_ERROR;
     }
@@ -720,36 +775,42 @@ ng_status ng_open(ng_graph** o, const char* p) {
         (h[5] != 1 && h[5] != 2 && h[5] != 3)) {
         fclose(f);
         ng_close(*o);
+        *o = NULL;
         return NG_CORRUPT;
     }
     z = get64(h + 8);
     if (z > SIZE_MAX) {
         fclose(f);
         ng_close(*o);
+        *o = NULL;
         return NG_CORRUPT;
     }
     d = (unsigned char*)malloc((size_t)z);
     if (z && !d) {
         fclose(f);
         ng_close(*o);
+        *o = NULL;
         return NG_OOM;
     }
     if (fread(d, 1, (size_t)z, f) != (size_t)z) {
         free(d);
         fclose(f);
         ng_close(*o);
+        *o = NULL;
         return NG_CORRUPT;
     }
     if (fgetc(f) != EOF || ferror(f)) {
         free(d);
         fclose(f);
         ng_close(*o);
+        *o = NULL;
         return NG_CORRUPT;
     }
     fclose(f);
     if (hash32(d, (size_t)z) != (uint32_t)get64(h + 24)) {
         free(d);
         ng_close(*o);
+        *o = NULL;
         return NG_CORRUPT;
     }
     c.p = d;
@@ -762,6 +823,7 @@ ng_status ng_open(ng_graph** o, const char* p) {
         nc > SIZE_MAX || nix > SIZE_MAX) {
         free(d);
         ng_close(*o);
+        *o = NULL;
         return NG_CORRUPT;
     }
     for (i = 0; i < (size_t)ns; i++) {
@@ -771,11 +833,13 @@ ng_status ng_open(ng_graph** o, const char* p) {
             !take_bytes(&c, &q, (size_t)len) || memchr(q, 0, (size_t)len)) {
             free(d);
             ng_close(*o);
+            *o = NULL;
             return NG_CORRUPT;
         }
         if (!grow((void**)&(*o)->sy, &(*o)->cs, (*o)->ns + 1, sizeof(*(*o)->sy))) {
             free(d);
             ng_close(*o);
+            *o = NULL;
             return NG_OOM;
         }
         (*o)->sy[(*o)->ns].id = id;
@@ -783,6 +847,7 @@ ng_status ng_open(ng_graph** o, const char* p) {
         if (!(*o)->sy[(*o)->ns].s) {
             free(d);
             ng_close(*o);
+            *o = NULL;
             return NG_OOM;
         }
         memcpy((*o)->sy[(*o)->ns].s, q, (size_t)len);
@@ -796,6 +861,7 @@ ng_status ng_open(ng_graph** o, const char* p) {
             !grow((void**)&(*o)->no, &(*o)->cn, (*o)->nn + 1, sizeof(*(*o)->no))) {
             free(d);
             ng_close(*o);
+            *o = NULL;
             return NG_CORRUPT;
         }
         x = &(*o)->no[(*o)->nn++];
@@ -807,18 +873,21 @@ ng_status ng_open(ng_graph** o, const char* p) {
             if (!x->labels) {
                 free(d);
                 ng_close(*o);
+                *o = NULL;
                 return NG_OOM;
             }
             for (j = 0; j < (size_t)nl; j++)
                 if (!take64(&c, (uint64_t*)&x->labels[j])) {
                     free(d);
                     ng_close(*o);
+                    *o = NULL;
                     return NG_CORRUPT;
                 }
         }
         if (!take64(&c, &np) || np > SIZE_MAX) {
             free(d);
             ng_close(*o);
+            *o = NULL;
             return NG_CORRUPT;
         }
         for (j = 0; j < (size_t)np; j++) {
@@ -827,6 +896,7 @@ ng_status ng_open(ng_graph** o, const char* p) {
                 !load_value(&c, &x->p[x->np].v)) {
                 free(d);
                 ng_close(*o);
+                *o = NULL;
                 return NG_CORRUPT;
             }
             x->p[x->np++].key = key;
@@ -838,6 +908,7 @@ ng_status ng_open(ng_graph** o, const char* p) {
         if (!grow((void**)&(*o)->re, &(*o)->cr, (*o)->nr + 1, sizeof(*(*o)->re))) {
             free(d);
             ng_close(*o);
+            *o = NULL;
             return NG_OOM;
         }
         r = &(*o)->re[(*o)->nr++];
@@ -846,6 +917,7 @@ ng_status ng_open(ng_graph** o, const char* p) {
             !take64(&c, &r->type) || !take64(&c, &np) || np > SIZE_MAX) {
             free(d);
             ng_close(*o);
+            *o = NULL;
             return NG_CORRUPT;
         }
         for (j = 0; j < (size_t)np; j++) {
@@ -854,6 +926,7 @@ ng_status ng_open(ng_graph** o, const char* p) {
                 !load_value(&c, &r->p[r->np].v)) {
                 free(d);
                 ng_close(*o);
+                *o = NULL;
                 return NG_CORRUPT;
             }
             r->p[r->np++].key = key;
@@ -865,6 +938,7 @@ ng_status ng_open(ng_graph** o, const char* p) {
             !grow((void**)&(*o)->co, &(*o)->cc, (*o)->nc + 1, sizeof(*(*o)->co))) {
             free(d);
             ng_close(*o);
+            *o = NULL;
             return NG_CORRUPT;
         }
         (*o)->co[(*o)->nc].kind = (ng_node_constraint_kind)kind;
@@ -878,6 +952,7 @@ ng_status ng_open(ng_graph** o, const char* p) {
             !grow((void**)&(*o)->ix, &(*o)->cix, (*o)->nix + 1, sizeof(*(*o)->ix))) {
             free(d);
             ng_close(*o);
+            *o = NULL;
             return NG_CORRUPT;
         }
         (*o)->ix[(*o)->nix].label = label;
@@ -887,10 +962,16 @@ ng_status ng_open(ng_graph** o, const char* p) {
     if (c.o != c.n) {
         free(d);
         ng_close(*o);
+        *o = NULL;
         return NG_CORRUPT;
     }
     free(d);
-    return ng_validate(*o);
+    s = ng_validate(*o);
+    if (s != NG_OK) {
+        ng_close(*o);
+        *o = NULL;
+    }
+    return s;
 }
 static void valfree(ng_value* v) {
     if (v->type == NG_VALUE_STRING || v->type == NG_VALUE_BYTES)
@@ -15474,13 +15555,25 @@ static ng_status ng_commit_pair(const char* nt,
         ng_restore_backup(relationships_file, rb, rhad);
         return NG_IO_ERROR;
     }
+    if (ng_sync_parent_dir(nodes_file) != NG_OK) {
+        ng_restore_backup(nodes_file, nb, nhad);
+        ng_restore_backup(relationships_file, rb, rhad);
+        return NG_IO_ERROR;
+    }
     if (rename(rt, relationships_file) != 0) {
+        ng_restore_backup(nodes_file, nb, nhad);
+        ng_restore_backup(relationships_file, rb, rhad);
+        return NG_IO_ERROR;
+    }
+    if (ng_sync_parent_dir(relationships_file) != NG_OK) {
         ng_restore_backup(nodes_file, nb, nhad);
         ng_restore_backup(relationships_file, rb, rhad);
         return NG_IO_ERROR;
     }
     remove(nb);
     remove(rb);
+    if (ng_sync_parent_dir(nodes_file) != NG_OK || ng_sync_parent_dir(relationships_file) != NG_OK)
+        return NG_IO_ERROR;
     return NG_OK;
 }
 ng_status ng_export_property_graph(const ng_graph* g,
@@ -15599,12 +15692,12 @@ ng_status ng_export_property_graph(const ng_graph* g,
                 break;
             }
     }
-    if (fclose(nf) != 0) {
+    if (ng_flush_file(nf) != NG_OK || fclose(nf) != 0) {
         nf = NULL;
         goto io_closed;
     }
     nf = NULL;
-    if (fclose(rf) != 0) {
+    if (ng_flush_file(rf) != NG_OK || fclose(rf) != 0) {
         rf = NULL;
         goto io_closed;
     }

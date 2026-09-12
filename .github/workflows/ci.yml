@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: make release-check CC=${{ matrix.cc }}
+      - name: Sanitizer test
+        run: make sanitizer CC=${{ matrix.cc }}
+      - name: Profiling smoke
+        run: make profile CC=${{ matrix.cc }}

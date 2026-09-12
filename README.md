@@ -8,7 +8,7 @@
 
 `nautylus` is intended for small embedded applications, command-line tools, tests, and data-processing workflows that need a persistent property graph without running a database server or adding an external dependency.
 
-**Status:** Usable alpha. The implemented subset is tested and usable, but multi-process writer coordination, large-graph performance work, and full Cypher compatibility are not claimed yet. MiniCypher now includes read clauses, write clauses, parameters, `WITH`, `OPTIONAL MATCH`, aggregates, ordering, rollback-protected writes, exact-match indexes, persisted required/unique property constraints, graph analytics APIs, and a local web workbench. See [STATUS.md](STATUS.md) for detailed implementation evidence.
+**Status:** Deployable alpha. The implemented subset is tested, installable, and usable for embedded/single-writer deployments, but multi-process writer coordination, large-graph performance work, and full Cypher compatibility are not claimed yet. MiniCypher now includes read clauses, write clauses, parameters, `WITH`, `OPTIONAL MATCH`, aggregates, ordering, rollback-protected writes, exact-match indexes, persisted required/unique property constraints, graph analytics APIs, and a local web workbench. See [STATUS.md](STATUS.md) for detailed implementation evidence.
 
 `nautylus` is inspired by Neo4j's property-graph model, but it does not implement Neo4j storage formats, Bolt, or full Cypher.
 
@@ -44,7 +44,11 @@ make
 ```
 
 This builds `build/nautylus.o` for embedding and `build/nautylus` for command-line use.
-It also builds `build/libnautylus.so` for the Python, PHP, and LuaJIT FFI bindings.
+It also builds:
+
+* `build/libnautylus.a` for static linking;
+* `build/libnautylus.so` for dynamic linking and the Python, PHP, and LuaJIT FFI bindings;
+* `build/nautylus.pc` for pkg-config consumers.
 
 Run tests:
 
@@ -57,6 +61,39 @@ Build examples:
 ```sh
 make examples
 ```
+
+Run the release gate:
+
+```sh
+make release-check
+make sanitizer
+make fuzz-smoke
+make profile
+```
+
+`make release-check` performs a clean build, builds static and shared library artifacts, runs the regression suite, compiles examples, and runs the fuzz corpus smoke test. `make sanitizer` runs the regression suite and fuzz smoke with AddressSanitizer and UndefinedBehaviorSanitizer; LeakSanitizer is disabled because some ptrace-based environments cannot run LSan for tests that spawn the CLI. `make profile` runs the local multi-size benchmark profile.
+
+`make fuzz` builds the libFuzzer harness with `FUZZ_CC=clang` by default. Override `FUZZ_CC` if your Clang binary has a different name.
+
+Install locally:
+
+```sh
+make install PREFIX=/usr/local
+```
+
+For packaging, stage into a destination root:
+
+```sh
+make install PREFIX=/usr DESTDIR="$PWD/package-root"
+```
+
+Installed files are:
+
+* `bin/nautylus`
+* `include/nautylus.h`
+* `lib/libnautylus.a`
+* `lib/libnautylus.so`
+* `lib/pkgconfig/nautylus.pc`
 
 The example folder now contains runnable coverage for the main surfaces:
 `basic.c` for direct graph mutation, `cypher.c` for parameterized MiniCypher,
@@ -162,7 +199,7 @@ nautylus index-create DB LABEL KEY
 nautylus index-drop DB LABEL KEY
 nautylus indexes DB
 nautylus bench FILE NODE_COUNT
-nautylus serve DB PORT [--auth-env VAR]
+nautylus serve DB PORT [--auth-env VAR] [--read-only] [--max-request BYTES]
 nautylus search DB QUERY
 nautylus query DB QUERY [--format auto|verbose|plain|json]
 nautylus explain QUERY
@@ -213,10 +250,16 @@ parse error
 
 ## C API Example
 
-Link against `build/nautylus.o` and include `src/nautylus.h`:
+Link against the built library and include `src/nautylus.h`:
 
 ```sh
-cc -std=c99 -Wall -Wextra -Wpedantic -O2 -Isrc my_app.c build/nautylus.o -o my_app
+cc -std=c99 -Wall -Wextra -Wpedantic -O2 -Isrc my_app.c build/libnautylus.a -ldl -lm -o my_app
+```
+
+After installation, pkg-config can provide the compiler and linker flags:
+
+```sh
+cc my_app.c $(pkg-config --cflags --libs nautylus) -o my_app
 ```
 
 Minimal checked example:
@@ -431,6 +474,9 @@ in the database. Use HTTPS or an SSH tunnel before exposing the server beyond a
 trusted local machine; the built-in server does not provide TLS. See
 [docs/security.md](docs/security.md).
 
+Use `--read-only` to disable workbench writes, including mutating MiniCypher
+queries, and `--max-request BYTES` to cap the complete HTTP request size.
+
 ## File Formats
 
 ### Triple TSV
@@ -534,10 +580,10 @@ Save sequence:
 1. Validate the in-memory graph.
 2. Encode the graph into a portable little-endian payload.
 3. Write a versioned header and checksum to `FILE.tmp`.
-4. Close the temporary file.
-5. Rename the temporary file over the target path.
+4. Flush and sync the temporary file.
+5. Rename the temporary file over the target path and sync its containing directory.
 
-If validation, encoding, writing, or closing fails before the rename, the previous database file is left intact. Rename atomicity and crash durability depend on the operating system and filesystem; the current implementation does not fsync the containing directory.
+If validation, encoding, writing, syncing, or closing fails before the rename, the previous database file is left intact. Rename atomicity and crash durability still depend on the operating system and filesystem.
 
 On POSIX systems, Nautylus applies owner-only permissions (`0600`) to native snapshots and other files it writes. This protects against accidental group/world readability under permissive umasks. It is not encryption or cryptographic authentication; use an encrypted filesystem or disk volume for sensitive data. See [docs/security.md](docs/security.md).
 
@@ -568,8 +614,7 @@ Not implemented yet:
 * scoped subqueries;
 * direct path rendering beyond the current structured path/list values;
 * large-scale graph analytics;
-* complete two-file export crash recovery;
-* fuzzing and profiling harnesses.
+* complete two-file export crash recovery.
 
 ## Development Status
 
@@ -578,11 +623,11 @@ Capability summary:
 | Area | Implemented now | Remaining |
 | --- | --- | --- |
 | Core graph | CRUD, labels, typed properties, property deletion, directed relationships, validation | Incremental adjacency maintenance |
-| Persistence | Single-file snapshots, checksum, strict load checks, atomic replacement where supported | Generations, per-section checksums, directory fsync, migrations |
+| Persistence | Single-file snapshots, checksum, strict load checks, atomic replacement where supported, POSIX file and directory sync | Generations, per-section checksums, migrations |
 | Query | Property retrieval, label checks, exact node scans, snapshot node indexes, persistent exact-match index metadata, persisted required/unique property constraints, property-aware node creation API, property-mutation constraint enforcement, bounded traversal, multi-node MiniCypher, `WHERE`, `WITH`, `UNWIND`, `OPTIONAL MATCH`, parameters, aggregates, `ORDER BY`, `SKIP`/`LIMIT`, `UNION`/`UNION ALL`/`UNION DISTINCT`, rollback-protected `CREATE`/`MERGE`/`SET`/`REMOVE`/`DELETE`/`DETACH DELETE`, nested map expressions, list expressions, searched `CASE`, fixed and bounded variable-length path bindings with `nodes()`/`relationships()`, generic `MERGE` `ON CREATE SET`/`ON MATCH SET`, typed graph-registered procedures with result aliases, seeded `randomWalk` procedure | Full Cypher compatibility, subqueries |
 | Analytics | Degree centrality, PageRank, eigenvector, closeness, harmonic centrality, weak/strong components, triangle count, local clustering coefficient, articulation points, bridges, common-neighbor, Adamic-Adar, Resource Allocation, topological sort, seeded random walks, weighted Dijkstra, BFS, DFS path enumeration, A*, minimum spanning tree, maximum flow, label propagation, Louvain-style local moving, FastRP, Node2Vec-style embeddings, GraphSAGE inference/training, exact/approximate/flat-ANN/HNSW vector search, Jaccard KNN, and label-filtered KNN | Multilevel Louvain/Leiden aggregation, richer filtered similarity, scalable implementations |
 | Import/export | Triple TSV/CSV, property-graph TSV, CLI workflows, rollback on import failure | Stronger two-file crash recovery, richer CLI flags |
-| Release quality | Strict C99 tests, ASan/UBSan run with LeakSanitizer disabled in this environment, documented tested limits, small local performance baseline, local web workbench smoke coverage | CI, fuzzing, profiling |
+| Release quality | Strict C99 tests, ASan/UBSan run with LeakSanitizer disabled in this environment, fuzz harness with corpus smoke, documented tested limits, small local performance baseline, profile target, local web workbench smoke coverage, release-check target, install targets, pkg-config metadata, GCC/Clang CI | Broader fuzz corpus, longer-running performance tracking |
 
 Detailed evidence is in [STATUS.md](STATUS.md).
 

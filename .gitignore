@@ -1,0 +1,11 @@
+build/
+build-asan/
+*.ng
+*.ngx
+*.ngv
+*.model
+*.out
+*.err
+nodes.tsv
+rels.tsv
+triples.tsv

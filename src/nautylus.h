@@ -4,6 +4,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#define NAUTYLUS_VERSION "0.1.0-alpha"
+
 typedef uint64_t ng_id;
 typedef ng_id ng_node_id;
 typedef ng_id ng_relationship_id;

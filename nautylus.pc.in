@@ -1,0 +1,10 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=@LIBDIR@
+includedir=@INCLUDEDIR@
+
+Name: nautylus
+Description: Compact embedded C99 property-graph database
+Version: @VERSION@
+Libs: -L${libdir} -lnautylus @LDLIBS@
+Cflags: -I${includedir}

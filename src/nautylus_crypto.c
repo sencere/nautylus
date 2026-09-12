@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L
 #include "nautylus.h"
 #include <stdint.h>
 #include <stdio.h>
@@ -6,6 +7,8 @@
 
 #ifndef _WIN32
 #include <dlfcn.h>
+#include <fcntl.h>
+#include <unistd.h>
 #endif
 
 #define NG_CRYPT_HEADER 8u
@@ -126,11 +129,54 @@ static ng_status ng_crypt_read(const char* path, unsigned char** out, size_t* ou
     return NG_OK;
 }
 
+static ng_status ng_crypt_flush_file(FILE* file) {
+    if (!file || fflush(file) != 0)
+        return NG_IO_ERROR;
+#ifndef _WIN32
+    if (fsync(fileno(file)) != 0)
+        return NG_IO_ERROR;
+#endif
+    return NG_OK;
+}
+
+static ng_status ng_crypt_sync_parent_dir(const char* path) {
+#ifdef _WIN32
+    (void)path;
+    return NG_OK;
+#else
+    char dir[4096];
+    const char* slash;
+    size_t length;
+    int fd;
+    if (!path || !*path)
+        return NG_INVALID_ARGUMENT;
+    slash = strrchr(path, '/');
+    if (!slash)
+        strcpy(dir, ".");
+    else if (slash == path)
+        strcpy(dir, "/");
+    else {
+        length = (size_t)(slash - path);
+        if (length >= sizeof(dir))
+            return NG_INVALID_ARGUMENT;
+        memcpy(dir, path, length);
+        dir[length] = 0;
+    }
+    fd = open(dir, O_RDONLY);
+    if (fd < 0)
+        return NG_IO_ERROR;
+    if (fsync(fd) != 0) {
+        close(fd);
+        return NG_IO_ERROR;
+    }
+    return close(fd) == 0 ? NG_OK : NG_IO_ERROR;
+#endif
+}
+
 static ng_status ng_crypt_write(const char* path, const unsigned char* data, size_t size) {
     FILE* file;
     char* temporary;
     size_t length;
-    int closed = 0;
     ng_status status = NG_IO_ERROR;
     if (!path || (!data && size))
         return NG_INVALID_ARGUMENT;
@@ -142,13 +188,13 @@ static ng_status ng_crypt_write(const char* path, const unsigned char* data, siz
     memcpy(temporary + length, ".tmp", 5);
     file = fopen(temporary, "wb");
     if (file && ng_secure_file(temporary) == NG_OK && fwrite(data, 1, size, file) == size &&
-        fclose(file) == 0) {
-        closed = 1;
+        ng_crypt_flush_file(file) == NG_OK && fclose(file) == 0) {
         file = 0;
-        if (rename(temporary, path) == 0 && ng_secure_file(path) == NG_OK)
+        if (rename(temporary, path) == 0 && ng_crypt_sync_parent_dir(path) == NG_OK &&
+            ng_secure_file(path) == NG_OK)
             status = NG_OK;
     }
-    if (file && !closed)
+    if (file)
         fclose(file);
     remove(temporary);
     free(temporary);

@@ -188,7 +188,7 @@ Value payloads:
 4. Closes `FILE.tmp`.
 5. Renames `FILE.tmp` over `FILE`.
 
-If validation, encoding, writing, or closing fails before rename, the old snapshot remains in place. Rename replacement is expected to be atomic on POSIX filesystems, but crash durability depends on filesystem behavior and directory sync semantics. The current implementation does not fsync the file or containing directory.
+If validation, encoding, writing, syncing, or closing fails before rename, the old snapshot remains in place. On POSIX systems, Nautylus flushes and syncs the temporary file, then syncs the containing directory after rename. Rename replacement and crash durability still depend on filesystem behavior.
 
 On POSIX systems, `ng_save()` hardens the temporary and final snapshot paths to
 owner-only permissions (`0600`). This protects against permissive process umasks

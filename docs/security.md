@@ -48,6 +48,10 @@ Alternatively, select another environment variable with:
 ./build/nautylus serve graph.ng 6180 --auth-env NAUTYLUS_AUTH
 ```
 
+For a browser view that must not modify the graph, add `--read-only`. The
+`--max-request BYTES` option limits the complete HTTP request size and helps
+bound memory and work per request.
+
 When configured, authentication is checked before static files or API routes
 are served. Missing or incorrect credentials receive `401 Unauthorized`. The
 credential is kept in process memory only and is never written into the graph

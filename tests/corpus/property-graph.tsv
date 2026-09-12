@@ -1,0 +1,2 @@
+node	a	Person	name=s:416461
+relationship	r	a	KNOWS	a	since=i:2026

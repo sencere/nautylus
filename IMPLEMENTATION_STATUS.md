@@ -1,6 +1,6 @@
 # Implementation Status
 
-Current deployability: **usable alpha**.
+Current deployability: **deployable alpha**.
 
 Nautylus currently provides:
 
@@ -9,7 +9,8 @@ Nautylus currently provides:
 * Atomic write execution across the supported write clauses.
 * Graph analytics including PageRank, centrality, components, triangle counting, clustering, link-prediction basics, topological sorting, weighted paths, flow, MST, seeded random walks, FastRP, Node2Vec-style embeddings, GraphSAGE inference/training, and exact/approximate/flat-ANN/HNSW vector search.
 * A local web workbench with graph rendering, query execution, node/relationship inspection, typed property display, and editable label colors.
+* Static/shared library artifacts, pkg-config metadata, install/uninstall targets, release-check, sanitizer, fuzz-smoke, libFuzzer, and profile Make targets, and GCC/Clang GitHub Actions CI.
 
-The project is not compatible with full Neo4j/Cypher. Major remaining areas include scoped subqueries, direct path rendering polish, multilevel Louvain/Leiden aggregation, richer filtered similarity, fuzzing, CI, and large-scale performance work.
+The project is not compatible with full Neo4j/Cypher. Major remaining areas include scoped subqueries, direct path rendering polish, multilevel Louvain/Leiden aggregation, richer filtered similarity, broader fuzz/performance campaigns, and large-scale performance work.
 
-`make test` passes with the strict C99 build configuration. See [STATUS.md](STATUS.md) for detailed capability evidence and roadmap status.
+`make release-check` and `make sanitizer` pass with the strict C99 build configuration. See [STATUS.md](STATUS.md) for detailed capability evidence and roadmap status.

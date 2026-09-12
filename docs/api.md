@@ -1,9 +1,9 @@
 # C API Notes
 
-Include `src/nautylus.h` and link your program with `build/nautylus.o`.
+Include `src/nautylus.h` and link your program with `build/libnautylus.a`.
 
 ```sh
-cc -std=c99 -Wall -Wextra -Wpedantic -O2 -Isrc my_app.c build/nautylus.o -o my_app
+cc -std=c99 -Wall -Wextra -Wpedantic -O2 -Isrc my_app.c build/libnautylus.a -ldl -lm -o my_app
 ```
 
 For runnable examples, build `make examples` and see:
@@ -32,6 +32,7 @@ Graph ownership:
 
 * `ng_create()` and `ng_open()` return a graph through `ng_graph **out`.
 * The caller owns the returned graph.
+* If `ng_open()` rejects a corrupt snapshot, `*out` is set to `NULL`.
 * Release it with `ng_close()`.
 * `ng_close(NULL)` is valid.
 

@@ -1,6 +1,6 @@
 # Tested Limits and Baseline
 
-This document records the small, repeatable limits covered by the current alpha test suite. It is not a capacity guarantee.
+This document records the small, repeatable limits covered by the current deployable-alpha test suite. It is not a capacity guarantee.
 
 ## Tested Functional Limits
 
@@ -15,6 +15,20 @@ The normal `make test` target covers:
 * allocation-failure rollback during property-graph import;
 * deterministic repeated property-graph exports.
 
+The `make release-check` target performs a clean production-style build of the
+CLI, static library, shared library, pkg-config metadata, tests, and examples.
+
+The `make sanitizer` target runs the regression suite with AddressSanitizer and
+UndefinedBehaviorSanitizer. LeakSanitizer is disabled in that target because
+some ptrace-based command runners cannot execute LSan for tests that spawn the
+CLI.
+
+The `make fuzz-smoke` target builds `tests/fuzz_nautylus.c` as a normal C99
+program and runs the checked-in corpus through query parsing, typed-value
+decoding, snapshot opening, and property-graph import. The `make fuzz` target
+builds the same harness as a libFuzzer target when the selected compiler
+supports `-fsanitize=fuzzer`.
+
 The `make examples` target compiles the runnable examples in `examples/*.c`.
 During local verification the examples are also run manually to exercise direct
 graph creation, MiniCypher execution, analytics, GraphSAGE training, and
@@ -28,6 +42,12 @@ Run:
 
 ```sh
 make perf
+```
+
+For a multi-size local profile:
+
+```sh
+make profile
 ```
 
 or:
